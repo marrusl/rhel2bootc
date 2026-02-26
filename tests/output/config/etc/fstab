@@ -1,0 +1,2 @@
+# /etc/fstab - fixture for storage inspector
+/dev/vda1 / xfs defaults 0 1

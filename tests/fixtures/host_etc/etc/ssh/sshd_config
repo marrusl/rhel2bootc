@@ -1,0 +1,3 @@
+# Port 22
+Port 22
+PermitRootLogin prohibit-password

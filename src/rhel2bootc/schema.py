@@ -1,0 +1,214 @@
+"""
+Inspection snapshot schema.
+
+Strongly typed contract between inspectors and renderers.
+All inspectors produce data that fits into this schema; all renderers consume it.
+"""
+
+from enum import Enum
+from typing import Any, List, Optional
+
+from pydantic import BaseModel, Field
+
+
+# --- Metadata (set by pipeline from host) ---
+
+
+class OsRelease(BaseModel):
+    """From /etc/os-release."""
+
+    name: str
+    version_id: str
+    version: str = ""
+    id: str = ""
+    id_like: str = ""
+    pretty_name: str = ""
+
+
+# --- RPM Inspector ---
+
+
+class PackageState(str, Enum):
+    ADDED = "added"
+    REMOVED = "removed"
+    MODIFIED = "modified"
+
+
+class PackageEntry(BaseModel):
+    """Single package from rpm -qa or baseline diff."""
+
+    name: str
+    epoch: str = "0"
+    version: str
+    release: str
+    arch: str
+    state: PackageState = PackageState.ADDED
+
+
+class RpmVaEntry(BaseModel):
+    """Single line from rpm -Va: modified file with verification flags."""
+
+    path: str
+    flags: str  # e.g. "S.5....T."
+    package: Optional[str] = None
+
+
+class RepoFile(BaseModel):
+    """Repo definition file (content or path)."""
+
+    path: str
+    content: str = ""
+
+
+class RpmSection(BaseModel):
+    """Output of the RPM inspector."""
+
+    packages_added: List[PackageEntry] = Field(default_factory=list)
+    packages_removed: List[PackageEntry] = Field(default_factory=list)
+    packages_modified: List[PackageEntry] = Field(default_factory=list)
+    rpm_va: List[RpmVaEntry] = Field(default_factory=list)
+    repo_files: List[RepoFile] = Field(default_factory=list)
+    dnf_history_removed: List[str] = Field(default_factory=list)  # package names
+
+
+# --- Config Inspector ---
+
+
+class ConfigFileKind(str, Enum):
+    RPM_OWNED_MODIFIED = "rpm_owned_modified"
+    UNOWNED = "unowned"
+    ORPHANED = "orphaned"  # from removed package
+
+
+class ConfigFileEntry(BaseModel):
+    """A config file captured by the Config inspector."""
+
+    path: str
+    kind: ConfigFileKind
+    content: str = ""
+    rpm_va_flags: Optional[str] = None  # if rpm-owned modified
+    package: Optional[str] = None
+    diff_against_rpm: Optional[str] = None  # unified diff when --config-diffs
+
+
+class ConfigSection(BaseModel):
+    """Output of the Config inspector."""
+
+    files: List[ConfigFileEntry] = Field(default_factory=list)
+
+
+# --- Service Inspector ---
+
+
+class ServiceStateChange(BaseModel):
+    """Service enablement/state vs baseline."""
+
+    unit: str
+    current_state: str  # enabled, disabled, masked, etc.
+    default_state: str
+    action: str  # "enable", "disable", "mask", or "unchanged"
+
+
+class ServiceSection(BaseModel):
+    """Output of the Service inspector."""
+
+    state_changes: List[ServiceStateChange] = Field(default_factory=list)
+    enabled_units: List[str] = Field(default_factory=list)
+    disabled_units: List[str] = Field(default_factory=list)
+
+
+# --- Placeholders for remaining inspectors (added in later steps) ---
+
+
+class NetworkSection(BaseModel):
+    """Output of the Network inspector."""
+
+    connections: List[dict] = Field(default_factory=list)
+    firewall_zones: List[dict] = Field(default_factory=list)
+    resolv_provenance: str = ""
+    hosts_additions: str = ""
+
+
+class StorageSection(BaseModel):
+    """Output of the Storage inspector."""
+
+    fstab_entries: List[dict] = Field(default_factory=list)
+    mount_points: List[dict] = Field(default_factory=list)
+    lvm_info: List[dict] = Field(default_factory=list)
+
+
+class ScheduledTaskSection(BaseModel):
+    """Output of the Scheduled Task inspector."""
+
+    cron_jobs: List[dict] = Field(default_factory=list)
+    systemd_timers: List[dict] = Field(default_factory=list)
+    generated_timer_units: List[dict] = Field(default_factory=list)  # name, timer_content, service_content, cron_expr
+
+
+class ContainerSection(BaseModel):
+    """Output of the Container inspector."""
+
+    quadlet_units: List[dict] = Field(default_factory=list)  # path, name, content (when captured)
+    compose_files: List[dict] = Field(default_factory=list)
+    running_containers: List[dict] = Field(default_factory=list)  # when --query-podman: id, names, image, etc.
+
+
+class NonRpmSoftwareSection(BaseModel):
+    """Output of the Non-RPM Software inspector."""
+
+    items: List[dict] = Field(default_factory=list)
+
+
+class KernelBootSection(BaseModel):
+    """Output of the Kernel/Boot inspector."""
+
+    cmdline: str = ""
+    grub_defaults: str = ""
+    sysctl_overrides: List[dict] = Field(default_factory=list)
+
+
+class SelinuxSection(BaseModel):
+    """Output of the SELinux/Security inspector."""
+
+    mode: str = ""
+    custom_modules: List[str] = Field(default_factory=list)
+    boolean_overrides: List[dict] = Field(default_factory=list)
+
+
+class UserGroupSection(BaseModel):
+    """Output of the User/Group inspector."""
+
+    users: List[dict] = Field(default_factory=list)
+    groups: List[dict] = Field(default_factory=list)
+
+
+# --- Root snapshot ---
+
+
+class InspectionSnapshot(BaseModel):
+    """
+    Full inspection snapshot. Serialized as inspection-snapshot.json.
+    All sections are optional so we can run a subset of inspectors.
+    """
+
+    meta: dict = Field(default_factory=dict)  # hostname, timestamp, profile, etc.
+    os_release: Optional[OsRelease] = None
+
+    rpm: Optional[RpmSection] = None
+    config: Optional[ConfigSection] = None
+    services: Optional[ServiceSection] = None
+
+    network: Optional[NetworkSection] = None
+    storage: Optional[StorageSection] = None
+    scheduled_tasks: Optional[ScheduledTaskSection] = None
+    containers: Optional[ContainerSection] = None
+    non_rpm_software: Optional[NonRpmSoftwareSection] = None
+    kernel_boot: Optional[KernelBootSection] = None
+    selinux: Optional[SelinuxSection] = None
+    users_groups: Optional[UserGroupSection] = None
+
+    # Populated after redaction pass
+    warnings: List[dict] = Field(default_factory=list)
+    redactions: List[dict] = Field(default_factory=list)
+
+    model_config = {"extra": "forbid"}
