@@ -16,7 +16,7 @@ The tool is structured as a pipeline of **inspectors** that each produce structu
 
 #### RPM Inspector
 
-`rpm -qa --queryformat` to get the full package list with epoch/version/release/arch, then diff against a known RHEL minimal or base group manifest (shipped with the tool — see [Baseline Manifest Strategy](#baseline-manifest-strategy)). Identifies: added packages, removed packages, modified package configs via `rpm -Va`.
+`rpm -qa --queryformat` to get the full package list with epoch/version/release/arch, then diff against a baseline generated from the distribution's comps XML (see [Baseline Generation](#baseline-generation)). Identifies: added packages, removed packages, modified package configs via `rpm -Va`.
 
 Also captures repo definitions from `/host/etc/yum.repos.d/` and `/host/etc/dnf/`.
 
@@ -24,7 +24,7 @@ Additionally checks `dnf history` for packages that were installed and later rem
 
 #### Service Inspector
 
-Systemctl state via `systemd-analyze dump` or direct unit file parsing. Diffs enabled/disabled/masked state against the defaults for the detected base install. This is trickier than it sounds because "default enabled" varies by install profile, so the tool needs a baseline manifest per RHEL version (see [Baseline Manifest Strategy](#baseline-manifest-strategy)).
+Systemctl state via `systemd-analyze dump` or direct unit file parsing. Diffs enabled/disabled/masked state against the defaults for the detected base install. Default service state is determined from systemd preset files shipped in the base packages (see [Baseline Generation](#baseline-generation)).
 
 #### Config Inspector
 
@@ -176,37 +176,46 @@ Non-system users and groups added to the system (UID/GID above system threshold,
 
 Captures: home directory contents inventory (not contents — just the tree structure for audit), shell assignments, group memberships, sudoers rules, SSH authorized_keys references (flagged for manual handling, not copied).
 
-### Baseline Manifest Strategy
+### Baseline Generation
 
-Baseline manifests are a significant maintenance burden. The initial release targets **RHEL 9.6, RHEL 9.7, and CentOS Stream 9** (as input hosts). Output base images are the corresponding `rhel-bootc` or `centos-bootc` images. CentOS Stream 9 support makes development and testing accessible without RHEL subscriptions.
+Rather than shipping static baseline manifests that need constant maintenance, the tool generates baselines dynamically at runtime by fetching and parsing the distribution's comps XML — the same group definitions the installer uses to determine what packages belong to each profile.
 
-**Shipped baselines (v1):**
+**How it works:**
 
-| Distribution | Profiles |
-|---|---|
-| RHEL 9.6 | minimal, server, workstation |
-| RHEL 9.7 | minimal, server, workstation |
-| CentOS Stream 9 | minimal, server, workstation |
+1. **Detect host identity.** Read `/host/etc/os-release` to determine distribution (RHEL, CentOS Stream) and version.
+2. **Fetch comps XML using the host's own repos.** The tool uses the repo configuration from `/host/etc/yum.repos.d/` and the host's subscription credentials (via `/host/etc/pki/`) to fetch the comps XML from the same repositories the host is subscribed to. This sidesteps the RHEL credential problem — the tool uses the host's own access rather than needing separate credentials. For CentOS Stream, the comps are available from public mirrors (e.g., `mirror.stream.centos.org`) and also maintained in git at `https://gitlab.com/CentOS/centos-stream-9-comps`.
+3. **Resolve the install profile.** Detect which profile was originally installed from `/host/root/anaconda-ks.cfg`, `/host/root/original-ks.cfg`, or install log artifacts in `/host/var/log/anaconda/`. If the profile cannot be determined, fall back to `@minimal` and emit a warning.
+4. **Parse group definitions.** Walk the comps XML to collect mandatory and default packages for the detected profile, resolving group dependencies (e.g., `@server` depends on `@core`, which is always included). This produces the package baseline.
+5. **Determine service baseline.** Parse systemd preset files from the base packages to establish which services are enabled or disabled by default. This covers the gap that comps XML doesn't address — comps defines *packages*, presets define *service state*.
+6. **Cache in the snapshot.** The resolved baseline is stored in `inspection-snapshot.json` so re-renders via `--from-snapshot` don't need network access.
 
-**Manifest structure for future expansion:**
+**Profile detection fallback:**
 
-Baselines are organized as `manifests/<distro>/<version>/<profile>.json` (e.g., `manifests/rhel/9.6/server.json`, `manifests/centos-stream/9/minimal.json`) inside the tool container. Adding support for a new version means adding a new directory with the corresponding profile JSONs. The tool detects the host distribution from `/host/etc/os-release` and validates that it has a matching manifest at startup, exiting with a clear error if not:
-
-```
-ERROR: Host is running RHEL 8.9. This version of rhel2bootc only supports
-RHEL 9.6, RHEL 9.7, and CentOS Stream 9. Support for additional versions
-is tracked at <issue-url>.
-```
-
-**Profile detection:** The tool attempts to determine the original install profile from `/host/root/anaconda-ks.cfg`, `/host/root/original-ks.cfg`, or install log artifacts in `/host/var/log/anaconda/`. If the profile cannot be determined, the tool falls back to `minimal` (the smallest diff baseline, which will over-report "added" packages) and emits a clear warning:
+If the original install profile cannot be determined, the tool falls back to `@minimal` (the smallest group, which will over-report "added" packages) and emits a clear warning:
 
 ```
-WARNING: Could not determine original install profile. Using 'minimal' baseline.
+WARNING: Could not determine original install profile. Using '@minimal' baseline.
 Some packages reported as "added" may have been part of the original installation.
 Review the package list in the audit report and remove false positives.
 ```
 
-Baselines are maintained as JSON manifests in the tool's container image and are versioned alongside the tool. Community contributions for additional profiles (e.g., @server-with-gui, custom kickstart profiles) and additional RHEL versions are accepted as PRs.
+**No network / air-gapped fallback:**
+
+If the comps XML cannot be fetched (air-gapped environment, broken repos, unreachable mirror), the tool degrades gracefully:
+
+```
+WARNING: Could not fetch comps XML from configured repositories.
+No baseline available — all installed packages will be included in the Containerfile.
+To reduce image size, provide a comps file via --comps-file or manually trim the package list.
+```
+
+In this mode, the Containerfile includes all installed packages rather than just the delta. The tool still performs all other inspection — config files, services, containers, non-RPM software, etc. — so it remains useful even without a baseline. The audit report's package section is labeled "no baseline — showing all packages" so operators understand why the list is comprehensive.
+
+For environments that are permanently air-gapped, the `--comps-file` flag accepts a path to a local comps XML file (extracted from an ISO or downloaded separately).
+
+**Version scope implications:**
+
+Because baselines are generated dynamically, the tool is no longer limited to specific RHEL minor versions. It works against any RHEL 9.x or CentOS Stream 9 host that has accessible repos. The version constraint becomes "does a corresponding bootc base image exist for the output" rather than "do we have a pre-built manifest." Support for RHEL 10 and future versions requires no manifest work — only verification that the comps XML format hasn't changed and that a suitable bootc base image is available.
 
 ## Secret Handling
 
@@ -253,8 +262,7 @@ Structured in a deliberate layer order to maximize cache efficiency:
 
 ```dockerfile
 # === Base Image ===
-# v1 targets RHEL 9.6/9.7 and CentOS Stream 9
-# Automatically selected based on detected host OS:
+# Automatically selected based on detected host OS and version:
 #   RHEL 9.x  → registry.redhat.io/rhel9/rhel-bootc:9.x
 #   CentOS S9 → quay.io/centos-bootc/centos-bootc:stream9
 FROM registry.redhat.io/rhel9/rhel-bootc:9.6
@@ -452,6 +460,7 @@ The default run is optimized for speed — it covers the vast majority of system
 | Flag | Default | Effect |
 |---|---|---|
 | `--output-dir DIR` | `./rhel2bootc-output/` | Directory to write all output artifacts to. Created if it doesn't exist. |
+| `--comps-file FILE` | off | Path to a local comps XML file for air-gapped environments where the tool cannot fetch comps from repos at runtime. |
 | `--validate` | off | After generating output, run `podman build` against the Containerfile to verify it builds successfully. Reports build errors with context so operators can fix issues before manual review. Requires `podman` on the host or in the tool container. |
 | `--config-diffs` | off | Extract RPM defaults via `rpm2cpio` and generate line-by-line diffs for modified config files. Requires RPMs to be in local cache or downloadable from repos. |
 | `--deep-binary-scan` | off | Run full `strings` scan on unknown binaries in `/opt` and `/usr/local` for version detection. Slow on large statically-linked binaries. |
@@ -480,3 +489,19 @@ Note: validation requires either `podman` available in the tool container (it al
 Python makes the most sense — it's available in UBI base images, has good libraries for all of this (`rpm` bindings, `GitPython`, `PyGithub`, `jinja2` for templating the Containerfile), and is readable enough that the heuristic logic in the non-RPM inspector is maintainable.
 
 The tool container is based on UBI and includes the inspection dependencies (`rpm`, `systemd` tools, `podman` CLI for container inspection). Target: `quay.io/yourorg/rhel2bootc:latest`.
+
+## Future Work
+
+The following are out of scope for the POC and v1 but represent the natural evolution of the tool:
+
+**In-place migration.** The logical endpoint is a mode where the tool doesn't just generate artifacts — it applies them. The operational model is: run the tool against one representative host from a pool of identically-configured machines, generate and refine the Containerfile, build the image, then deploy that single image across the fleet via `bootc install-to-filesystem` or `system-reinstall-bootc`. The tool does not need to run against every host — that would produce a separate image per host, which defeats the purpose of image-based management. One image per role, deployed to many hosts, is the bootc model. Host-specific configuration (hostname, network, credentials) is applied at deploy time via kickstart or provisioning tooling. This is deliberately excluded from v1 because the tool's current value proposition is *safe and read-only* — it never touches the source system, which is what makes it trustworthy enough to run against production. The in-place migration mode should only be built once the read-only tool has been used across enough real systems to establish confidence in the accuracy of the generated Containerfiles.
+
+**Fleet analysis mode.** For environments where hosts in the same role have drifted from each other over time, a mode that ingests multiple snapshots from the same nominal role, identifies the common base, and highlights per-host deviations. This helps operators decide which host is the most representative to use as the source for the golden image, and flags hosts that have diverged in ways that need reconciliation before fleet-wide deployment.
+
+**Snapshot diffing and drift detection.** The structured inspection snapshot is independently valuable beyond migration. Diffing snapshots across hosts or across time enables configuration drift detection, compliance auditing, and fleet-wide inventory. A stable, well-documented snapshot schema is the foundation for this.
+
+**Additional distribution support.** The dynamic comps-based baseline generation handles RHEL 9.x and CentOS Stream 9 automatically. RHEL 10 support requires verifying that the comps XML format is compatible and that suitable bootc base images are available. Fedora support would be a natural extension given that Fedora also uses comps and has bootc images.
+
+**Enhanced cron-to-timer conversion.** Deeper semantic analysis of cron jobs to handle edge cases: `MAILTO` conversion to systemd journal notifications, `@reboot` entries mapped to oneshot services, `%` character handling, and environment variable inheritance differences.
+
+**Config file semantic diffing.** Beyond line-level diffs (via `--config-diffs`), understanding the *meaning* of config changes — e.g., recognizing that a change to `MaxClients` in `httpd.conf` is a performance tuning decision vs. a change to `DocumentRoot` which is a structural decision. This would improve the audit report's guidance on which changes to keep vs. reconsider.
