@@ -55,15 +55,40 @@ def _truncated_sha256(value: str, length: int = 8) -> str:
     return hashlib.sha256(value.encode()).hexdigest()[:length]
 
 
+# Values that commonly appear after "password:" or "passwd:" in config files
+# but are not actual secrets (e.g. nsswitch.conf, PAM configs, sudoers).
+_FALSE_POSITIVE_VALUES = frozenset({
+    "files", "sss", "compat", "nis", "ldap", "systemd", "winbind", "dns",
+    "required", "requisite", "sufficient", "optional", "include", "substack",
+    "prompt", "true", "false", "yes", "no", "none", "null", "disabled",
+    "all",
+    "sha512", "sha256", "md5", "blowfish", "yescrypt", "des",
+    "pam_unix.so", "pam_deny.so", "pam_permit.so", "pam_pwquality.so",
+    "pam_sss.so", "pam_faildelay.so", "pam_env.so", "pam_localuser.so",
+    "pam_systemd.so", "pam_faillock.so", "pam_succeed_if.so",
+})
+
+
+def _is_comment_line(text: str, match_start: int) -> bool:
+    """Check whether the match occurs on a comment line (starts with # or ;)."""
+    line_start = text.rfind("\n", 0, match_start) + 1
+    prefix = text[line_start:match_start].lstrip()
+    return prefix.startswith("#") or prefix.startswith(";") or prefix.startswith("!")
+
+
 def _redact_text(text: str, path: str, redactions: List[dict]) -> str:
     out = text
     for pattern, type_label in REDACT_PATTERNS:
         for m in list(re.finditer(pattern, out, re.IGNORECASE | re.DOTALL)):
+            if _is_comment_line(out, m.start()):
+                continue
             original = m.group(0)
             if type_label == "PRIVATE_KEY":
                 replacement = f"REDACTED_{type_label}_<removed>"
             else:
                 sub = m.group(2) if m.lastindex and m.lastindex >= 2 else m.group(0)
+                if type_label == "PASSWORD" and sub.strip().lower() in _FALSE_POSITIVE_VALUES:
+                    continue
                 replacement = f"REDACTED_{type_label}_{_truncated_sha256(sub)}"
             out = out.replace(original, replacement, 1)
             redactions.append({

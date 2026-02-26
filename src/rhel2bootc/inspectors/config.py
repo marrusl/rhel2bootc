@@ -21,8 +21,12 @@ def _rpm_owned_paths(executor: Optional[Executor], host_root: Path) -> Set[str]:
     """
     if executor is None:
         return set()
-    cmd = ["rpm", "--root", str(host_root), "-qa", "--queryformat", "[%{FILENAMES}\n]"]
+    dbpath = str(host_root / "var" / "lib" / "rpm")
+    cmd = ["rpm", "--dbpath", dbpath, "-qa", "--queryformat", "[%{FILENAMES}\n]"]
     result = executor(cmd)
+    if result.returncode != 0:
+        cmd = ["rpm", "--root", str(host_root), "--define", "_rpmlock_path /var/tmp/.rpm.lock", "-qa", "--queryformat", "[%{FILENAMES}\n]"]
+        result = executor(cmd)
     if result.returncode != 0:
         return set()
     paths: Set[str] = set()

@@ -49,6 +49,25 @@ def _safe_iterdir(d: Path) -> list:
         return []
 
 
+# Standard FHS directories under /usr/local that are always present and
+# should only be reported if they contain actual user-installed content.
+_FHS_DIRS = frozenset({
+    "bin", "etc", "games", "include", "lib", "lib64", "libexec",
+    "sbin", "share", "src", "man",
+})
+
+
+def _dir_has_content(d: Path) -> bool:
+    """Return True if d contains at least one regular file (at any depth)."""
+    try:
+        for p in d.rglob("*"):
+            if p.is_file():
+                return True
+    except (PermissionError, OSError):
+        pass
+    return False
+
+
 def _scan_dirs(section: NonRpmSoftwareSection, host_root: Path, executor: Optional[Executor], deep: bool) -> None:
     """Scan /opt and /usr/local for non-RPM software directories."""
     for base in ("opt", "usr/local"):
@@ -56,24 +75,27 @@ def _scan_dirs(section: NonRpmSoftwareSection, host_root: Path, executor: Option
         if not d.exists():
             continue
         for entry in _safe_iterdir(d):
-            if entry.is_dir() and not entry.name.startswith("."):
-                item: dict = {"path": str(entry.relative_to(host_root)), "name": entry.name, "confidence": "low", "method": "directory scan"}
-                if executor:
-                    try:
-                        for f in entry.rglob("*"):
-                            if not f.is_file():
-                                continue
-                            if _is_binary(executor, host_root, f):
-                                limit = None if deep else 4
-                                ver = _strings_version(executor, f, limit_kb=limit)
-                                if ver:
-                                    item["version"] = ver
-                                    item["method"] = "strings" if deep else "strings (first 4KB)"
-                                    item["confidence"] = "medium"
-                                    break
-                    except Exception:
-                        pass
-                section.items.append(item)
+            if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if base == "usr/local" and entry.name in _FHS_DIRS and not _dir_has_content(entry):
+                continue
+            item: dict = {"path": str(entry.relative_to(host_root)), "name": entry.name, "confidence": "low", "method": "directory scan"}
+            if executor:
+                try:
+                    for f in entry.rglob("*"):
+                        if not f.is_file():
+                            continue
+                        if _is_binary(executor, host_root, f):
+                            limit = None if deep else 4
+                            ver = _strings_version(executor, f, limit_kb=limit)
+                            if ver:
+                                item["version"] = ver
+                                item["method"] = "strings" if deep else "strings (first 4KB)"
+                                item["confidence"] = "medium"
+                                break
+                except Exception:
+                    pass
+            section.items.append(item)
 
 
 def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optional[Executor]) -> None:

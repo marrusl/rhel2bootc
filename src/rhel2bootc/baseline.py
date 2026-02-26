@@ -242,7 +242,7 @@ def fetch_comps_from_repos(
     host_root: Path,
     id_val: str,
     version_id: str,
-    basearch: str = "x86_64",
+    basearch: str = "",
 ) -> Optional[str]:
     """
     Fetch comps XML from the host's configured repos.
@@ -251,6 +251,8 @@ def fetch_comps_from_repos(
     Returns decompressed XML content or None if fetch failed.
     """
     host_root = Path(host_root)
+    if not basearch:
+        basearch = _detect_basearch(host_root)
     releasever = version_id
     baseurls = _get_repo_baseurls(host_root, releasever, basearch)
     if not baseurls:
@@ -284,12 +286,42 @@ def fetch_comps_from_repos(
     return None
 
 
+def _detect_basearch(host_root: Path) -> str:
+    """Detect the host's base architecture from /etc/rpm/platform or os-release."""
+    rpm_platform = host_root / "etc" / "rpm" / "platform"
+    try:
+        if rpm_platform.exists():
+            arch = rpm_platform.read_text().strip().split("-")[0]
+            if arch:
+                return arch
+    except (PermissionError, OSError):
+        pass
+    # Fallback: check uname-like markers in /etc/os-release or kernel cmdline
+    for marker_file in ("proc/cmdline",):
+        p = host_root / marker_file
+        try:
+            if p.exists():
+                text = p.read_text()
+                if "aarch64" in text:
+                    return "aarch64"
+                if "x86_64" in text:
+                    return "x86_64"
+                if "ppc64le" in text:
+                    return "ppc64le"
+                if "s390x" in text:
+                    return "s390x"
+        except (PermissionError, OSError):
+            pass
+    import platform
+    return platform.machine() or "x86_64"
+
+
 def get_baseline_packages(
     host_root: Path,
     os_id: str,
     version_id: str,
     comps_file: Optional[Path] = None,
-    basearch: str = "x86_64",
+    basearch: str = "",
 ) -> Tuple[Optional[Set[str]], Optional[str], bool]:
     """
     Resolve baseline package set and profile used.
@@ -300,6 +332,8 @@ def get_baseline_packages(
     - If we have comps: detect_profile or "minimal", resolve and return (set, profile, False).
     - If no comps: return (None, None, True) for all-packages mode.
     """
+    if not basearch:
+        basearch = _detect_basearch(host_root)
     xml_content: Optional[str] = None
     if comps_file and Path(comps_file).exists():
         try:

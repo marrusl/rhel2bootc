@@ -20,6 +20,12 @@ from ..schema import (
 
 RPM_QA_QUERYFORMAT = r"%{EPOCH}:%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}"
 
+# When the host root is a read-only bind mount, rpm --root fails because it
+# can't create a lock file.  For read-only queries (-qa, --queryformat) we use
+# --dbpath which only needs DB access.  For -Va (file verification) we still
+# need --root but redirect the lock to a writable location.
+_RPM_LOCK_DEFINE = ["--define", "_rpmlock_path /var/tmp/.rpm.lock"]
+
 
 def _parse_nevr(nevra: str) -> Optional[PackageEntry]:
     """Parse a single NEVRA line from rpm -qa --queryformat."""
@@ -105,9 +111,13 @@ def _collect_repo_files(host_root: Path) -> List[RepoFile]:
     repo_files = []
     for subdir in ("etc/yum.repos.d", "etc/dnf"):
         d = host_root / subdir
-        if not d.exists():
+        try:
+            if not d.exists():
+                continue
+            entries = sorted(d.iterdir())
+        except (PermissionError, OSError):
             continue
-        for f in sorted(d.iterdir()):
+        for f in entries:
             if f.is_file() and (f.suffix in (".repo", ".conf") or subdir == "etc/dnf"):
                 try:
                     content = f.read_text()
@@ -164,12 +174,14 @@ def run(
     host_root = Path(host_root)
     section = RpmSection()
 
-    # 1) rpm -qa
+    # 1) rpm -qa — use --dbpath to avoid lock-file issues on read-only mounts
     if executor is not None:
-        cmd_qa = ["rpm", "-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
-        if str(host_root) != "/":
-            cmd_qa = ["rpm", "--root", str(host_root), "-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
+        dbpath = str(host_root / "var" / "lib" / "rpm")
+        cmd_qa = ["rpm", "--dbpath", dbpath, "-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
         result_qa = executor(cmd_qa)
+        if result_qa.returncode != 0:
+            cmd_qa = ["rpm", "--root", str(host_root)] + _RPM_LOCK_DEFINE + ["-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
+            result_qa = executor(cmd_qa)
         installed = _parse_rpm_qa(result_qa.stdout)
     else:
         installed = []
@@ -212,11 +224,11 @@ def run(
                 p.state = PackageState.ADDED
                 section.packages_added.append(p)
 
-    # 3) rpm -Va
+    # 3) rpm -Va — needs --root for file verification; redirect lock to writable path
     if executor is not None:
         cmd_va = ["rpm", "-Va", "--nodeps", "--noscripts"]
         if str(host_root) != "/":
-            cmd_va = ["rpm", "--root", str(host_root), "-Va", "--nodeps", "--noscripts"]
+            cmd_va = ["rpm", "--root", str(host_root)] + _RPM_LOCK_DEFINE + ["-Va", "--nodeps", "--noscripts"]
         result_va = executor(cmd_va)
         section.rpm_va = _parse_rpm_va(result_va.stdout)
     else:

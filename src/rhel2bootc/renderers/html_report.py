@@ -271,11 +271,17 @@ h1, h2, h3 { margin-top: 0; }
 a { color: var(--accent); }
 .banner { background: var(--card); border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1rem; border-left: 4px solid var(--accent); }
 .warning-panel { background: #2d1f1f; border: 1px solid var(--warn); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
-.warning-panel.dismissed { display: none; }
-.warning-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
-.warning-panel h3 { color: var(--warn); margin-top: 0; flex: 1; }
-.warning-panel-dismiss { background: var(--card); border: 1px solid var(--warn); color: var(--warn); border-radius: 6px; padding: 0.35rem 0.75rem; cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+.warning-panel.collapsed { display: none; }
+.warning-panel-header { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 0.5rem; }
+.warning-panel h3 { color: var(--warn); margin: 0; flex: 1; }
+.warning-panel-dismiss { background: var(--card); border: 1px solid var(--warn); color: var(--warn); border-radius: 6px; padding: 0.35rem 0.75rem; cursor: pointer; font-size: 0.9rem; font-weight: 500; white-space: nowrap; }
 .warning-panel-dismiss:hover { background: var(--warn); color: var(--bg); border-color: var(--warn); }
+.warning-row { display: flex; align-items: flex-start; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid rgba(210,153,34,0.15); }
+.warning-row.dismissed { display: none; }
+.warning-row:last-child { border-bottom: none; }
+.warning-row .warning-msg { flex: 1; font-size: 0.9rem; }
+.warning-row-dismiss { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1.1rem; line-height: 1; padding: 0.15rem 0.35rem; border-radius: 4px; flex-shrink: 0; }
+.warning-row-dismiss:hover { color: var(--warn); background: rgba(210,153,34,0.15); }
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
 .card { background: var(--card); border-radius: 8px; padding: 1rem; cursor: pointer; border: 1px solid transparent; transition: border-color .15s; }
 .card:hover { border-color: var(--accent); }
@@ -331,22 +337,33 @@ th { color: var(--muted); font-weight: 500; }
   <strong>Host:</strong> """ + os_desc + """ &nbsp;|&nbsp;
   <strong>Packages added:</strong> """ + str(counts["packages_added"]) + """ &nbsp;|&nbsp;
   <strong>Config files:</strong> """ + str(counts["config_files"]) + """ &nbsp;|&nbsp;
-  <strong>Secrets redacted:</strong> """ + str(counts["redactions"]) + """
+  <strong>Secrets redacted:</strong> """ + str(counts["redactions"]) + """ &nbsp;|&nbsp;
+  <strong>Warnings:</strong> <span id="banner-warning-count">""" + str(len(warnings)) + """</span>
 </div>
 """)
 
     if warnings:
-        html_parts.append("""<div id="warning-banner" class="warning-panel">
+        panel_warnings = warnings[:50]
+        overflow = len(warnings) - len(panel_warnings)
+        html_parts.append("""<div id="warning-banner" class="warning-panel" data-overflow-count=\"""" + str(overflow) + """\">
   <div class="warning-panel-header">
-    <h3>Warnings &amp; items to review</h3>
-    <button type="button" class="warning-panel-dismiss" id="warning-banner-dismiss" aria-label="Dismiss">Dismiss</button>
+    <h3>Warnings &amp; items to review (<span id="warning-banner-count">""" + str(len(warnings)) + """</span>)</h3>
+    <button type="button" class="warning-panel-dismiss" id="warning-dismiss-all" aria-label="Dismiss All">Dismiss All</button>
   </div>
-  <ul id="warning-list">""")
-        for w in warnings[:30]:
-            msg = (w.get("message") or w.get("detail") or "—")
+  <div id="warning-rows">""")
+        for idx, w in enumerate(panel_warnings):
+            msg = (w.get("message") or w.get("detail") or "—").replace("<", "&lt;").replace(">", "&gt;")
             sev = (w.get("severity") or "warning")
-            html_parts.append(f'<li class="badge {sev}">{sev}</li> {msg}<br/>')
-        html_parts.append("""  </ul>
+            html_parts.append(
+                f'<div class="warning-row" data-warning-idx="{idx}">'
+                f'<span class="badge {sev}">{sev}</span>'
+                f'<span class="warning-msg">{msg}</span>'
+                f'<button type="button" class="warning-row-dismiss" aria-label="Dismiss">&times;</button>'
+                f'</div>'
+            )
+        if overflow > 0:
+            html_parts.append(f'<div class="warning-row" style="color:var(--muted);font-size:0.85rem;justify-content:center;">… and {overflow} more in the Warnings tab</div>')
+        html_parts.append("""  </div>
 </div>
 """)
 
@@ -630,13 +647,43 @@ th { color: var(--muted); font-weight: 500; }
   });
   show('summary');
   var warningBanner = document.getElementById('warning-banner');
-  var dismissBtn = document.getElementById('warning-banner-dismiss');
-  if (warningBanner && dismissBtn) {
-    dismissBtn.addEventListener('click', function(){
-      warningBanner.classList.add('dismissed');
-      var statusEl = document.getElementById('warnings-card-status');
-      if (statusEl) statusEl.textContent = 'Panel dismissed';
+  var bannerCount = document.getElementById('banner-warning-count');
+  var panelCount = document.getElementById('warning-banner-count');
+
+  var overflowCount = parseInt(warningBanner ? warningBanner.getAttribute('data-overflow-count') : '0', 10) || 0;
+
+  function updateWarningCounts() {
+    if (!warningBanner) return;
+    var visibleRows = warningBanner.querySelectorAll('.warning-row[data-warning-idx]:not(.dismissed)');
+    var panelVisible = visibleRows.length;
+    var total = panelVisible + overflowCount;
+    if (bannerCount) bannerCount.textContent = total;
+    if (panelCount) panelCount.textContent = total;
+    var cardCount = document.getElementById('warnings-card-count');
+    if (cardCount) cardCount.textContent = total;
+    var statusEl = document.getElementById('warnings-card-status');
+    if (statusEl) statusEl.textContent = panelVisible > 0 ? 'Review required' : (overflowCount > 0 ? 'Panel cleared' : 'All dismissed');
+    if (panelVisible === 0) {
+      warningBanner.classList.add('collapsed');
+    }
+  }
+
+  if (warningBanner) {
+    warningBanner.querySelectorAll('.warning-row-dismiss').forEach(function(btn){
+      btn.addEventListener('click', function(){
+        this.closest('.warning-row').classList.add('dismissed');
+        updateWarningCounts();
+      });
     });
+    var dismissAll = document.getElementById('warning-dismiss-all');
+    if (dismissAll) {
+      dismissAll.addEventListener('click', function(){
+        warningBanner.querySelectorAll('.warning-row').forEach(function(row){
+          row.classList.add('dismissed');
+        });
+        updateWarningCounts();
+      });
+    }
   }
   var search = document.getElementById('warn-search');
   if (search) {
