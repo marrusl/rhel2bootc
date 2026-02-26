@@ -40,6 +40,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Run inspectors and save snapshot to output; do not run renderers",
     )
 
+    # Air-gapped baseline
+    parser.add_argument(
+        "--comps-file",
+        type=Path,
+        metavar="FILE",
+        help="Path to local comps XML for baseline generation (air-gapped environments)",
+    )
+
     # Opt-in deeper inspection (design doc)
     parser.add_argument(
         "--config-diffs",

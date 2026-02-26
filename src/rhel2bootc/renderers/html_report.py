@@ -203,6 +203,12 @@ def _summary_counts(snapshot: InspectionSnapshot) -> dict:
         n_containers = len(snapshot.containers.quadlet_units or []) + len(snapshot.containers.compose_files or [])
     n_non_rpm = len(snapshot.non_rpm_software.items or []) if snapshot.non_rpm_software else 0
     n_users = len(snapshot.users_groups.users or []) + len(snapshot.users_groups.groups or []) if snapshot.users_groups else 0
+    n_kernel = 0
+    if snapshot.kernel_boot:
+        n_kernel = (1 if snapshot.kernel_boot.cmdline else 0) + len(snapshot.kernel_boot.sysctl_overrides or []) + len(snapshot.kernel_boot.modules_load_d or []) + len(snapshot.kernel_boot.modprobe_d or []) + len(snapshot.kernel_boot.dracut_conf or [])
+    n_selinux = 0
+    if snapshot.selinux:
+        n_selinux = len(snapshot.selinux.custom_modules or []) + len(snapshot.selinux.boolean_overrides or []) + len(snapshot.selinux.audit_rules or []) + (1 if snapshot.selinux.fips_mode else 0)
     return {
         "packages_added": len(snapshot.rpm.packages_added or []) if snapshot.rpm else 0,
         "packages_removed": len(snapshot.rpm.packages_removed or []) if snapshot.rpm else 0,
@@ -218,6 +224,8 @@ def _summary_counts(snapshot: InspectionSnapshot) -> dict:
         "containers": n_containers,
         "non_rpm": n_non_rpm,
         "users_groups": n_users,
+        "kernel_boot": n_kernel,
+        "selinux": n_selinux,
     }
 
 
@@ -352,6 +360,8 @@ th { color: var(--muted); font-weight: 500; }
   <div class="card" data-section="scheduled_tasks"><h4>Scheduled</h4><div class="count">""" + str(counts["scheduled_tasks"]) + """</div><div class="status">cron / timers</div></div>
   <div class="card" data-section="containers"><h4>Containers</h4><div class="count">""" + str(counts["containers"]) + """</div><div class="status">quadlet / compose</div></div>
   <div class="card" data-section="non_rpm"><h4>Non-RPM</h4><div class="count">""" + str(counts["non_rpm"]) + """</div><div class="status">items</div></div>
+  <div class="card" data-section="kernel_boot"><h4>Kernel/Boot</h4><div class="count">""" + str(counts["kernel_boot"]) + """</div><div class="status">configs</div></div>
+  <div class="card" data-section="selinux"><h4>SELinux</h4><div class="count">""" + str(counts["selinux"]) + """</div><div class="status">customizations</div></div>
   <div class="card" data-section="users_groups"><h4>Users/Groups</h4><div class="count">""" + str(counts["users_groups"]) + """</div><div class="status">non-system</div></div>
   <div class="card" data-section="warnings"><h4>Warnings</h4><div class="count" id="warnings-card-count">""" + str(len(warnings)) + """</div><div class="status" id="warnings-card-status">Review required</div></div>
   <div class="card" data-section="containerfile"><h4>Containerfile</h4><div class="count">""" + (str(containerfile_content.count("\n") + 1) if containerfile_content else "0") + """ lines</div><div class="status">Generated</div></div>
@@ -369,6 +379,8 @@ th { color: var(--muted); font-weight: 500; }
   <button data-tab="scheduled_tasks">Scheduled</button>
   <button data-tab="containers">Containers</button>
   <button data-tab="non_rpm">Non-RPM</button>
+  <button data-tab="kernel_boot">Kernel/Boot</button>
+  <button data-tab="selinux">SELinux</button>
   <button data-tab="users_groups">Users/Groups</button>
   <button data-tab="warnings">Warnings</button>
   <button data-tab="containerfile">Containerfile</button>
@@ -415,6 +427,8 @@ th { color: var(--muted); font-weight: 500; }
 
     # Packages section
     html_parts.append('<div id="section-packages" class="section"><h2>Packages</h2>')
+    if snapshot.rpm and getattr(snapshot.rpm, "no_baseline", False):
+        html_parts.append("<p><em>No baseline — showing all packages.</em></p>")
     if snapshot.rpm and snapshot.rpm.packages_added:
         html_parts.append("<table><thead><tr><th>Name</th><th>Version</th><th>Release</th><th>Arch</th></tr></thead><tbody>")
         for p in snapshot.rpm.packages_added[:100]:
@@ -441,13 +455,14 @@ th { color: var(--muted); font-weight: 500; }
     # Config section
     html_parts.append('<div id="section-config" class="section"><h2>Configuration files</h2>')
     if snapshot.config and snapshot.config.files:
-        html_parts.append("<table><thead><tr><th>Path</th><th>Kind</th><th>Diff</th></tr></thead><tbody>")
+        html_parts.append("<table><thead><tr><th>Path</th><th>Kind</th><th>rpm -Va flags</th><th>Diff</th></tr></thead><tbody>")
         for f in snapshot.config.files:
             diff_cell = ""
             if f.diff_against_rpm:
                 escaped = f.diff_against_rpm.replace("<", "&lt;").replace(">", "&gt;")[:2000]
                 diff_cell = f'<pre style="max-height:200px;overflow:auto;font-size:0.85em">{escaped}</pre>'
-            html_parts.append(f"<tr><td><code>{f.path}</code></td><td>{f.kind.value}</td><td>{diff_cell}</td></tr>")
+            flags_cell = f"<code>{f.rpm_va_flags}</code>" if f.rpm_va_flags else ""
+            html_parts.append(f"<tr><td><code>{f.path}</code></td><td>{f.kind.value}</td><td>{flags_cell}</td><td>{diff_cell}</td></tr>")
         html_parts.append("</tbody></table>")
     else:
         html_parts.append("<p>No config files.</p>")
@@ -509,6 +524,43 @@ th { color: var(--muted); font-weight: 500; }
         html_parts.append("</tbody></table>")
     else:
         html_parts.append("<p>No non-RPM software.</p>")
+    html_parts.append("</div>")
+
+    # Kernel/Boot section
+    html_parts.append('<div id="section-kernel_boot" class="section"><h2>Kernel and boot</h2>')
+    if snapshot.kernel_boot and (snapshot.kernel_boot.cmdline or snapshot.kernel_boot.sysctl_overrides or snapshot.kernel_boot.modules_load_d or snapshot.kernel_boot.modprobe_d or snapshot.kernel_boot.dracut_conf):
+        if snapshot.kernel_boot.cmdline:
+            cmdline_escaped = snapshot.kernel_boot.cmdline[:300].replace("<", "&lt;").replace(">", "&gt;")
+            html_parts.append(f"<p><strong>cmdline:</strong> <code>{cmdline_escaped}</code></p>")
+        if snapshot.kernel_boot.sysctl_overrides:
+            html_parts.append(f"<p>Sysctl overrides: {len(snapshot.kernel_boot.sysctl_overrides)}</p>")
+        if snapshot.kernel_boot.modules_load_d:
+            html_parts.append(f"<p>modules-load.d: {len(snapshot.kernel_boot.modules_load_d)} file(s)</p>")
+        if snapshot.kernel_boot.modprobe_d:
+            html_parts.append(f"<p>modprobe.d: {len(snapshot.kernel_boot.modprobe_d)} file(s)</p>")
+        if snapshot.kernel_boot.dracut_conf:
+            html_parts.append(f"<p>dracut.conf.d: {len(snapshot.kernel_boot.dracut_conf)} file(s)</p>")
+    else:
+        html_parts.append("<p>No kernel/boot customizations detected.</p>")
+    html_parts.append("</div>")
+
+    # SELinux section
+    html_parts.append('<div id="section-selinux" class="section"><h2>SELinux / Security</h2>')
+    if snapshot.selinux and (snapshot.selinux.mode or snapshot.selinux.custom_modules or snapshot.selinux.boolean_overrides or snapshot.selinux.audit_rules or snapshot.selinux.fips_mode):
+        if snapshot.selinux.mode:
+            html_parts.append(f"<p><strong>Mode:</strong> {snapshot.selinux.mode}</p>")
+        if snapshot.selinux.fips_mode:
+            html_parts.append("<p><strong>FIPS mode:</strong> enabled</p>")
+        if snapshot.selinux.custom_modules:
+            html_parts.append(f"<p>Custom modules: {len(snapshot.selinux.custom_modules)}</p>")
+        if snapshot.selinux.boolean_overrides:
+            html_parts.append(f"<p>Boolean overrides: {len(snapshot.selinux.boolean_overrides)}</p>")
+        if snapshot.selinux.audit_rules:
+            html_parts.append(f"<p>Audit rule files: {len(snapshot.selinux.audit_rules)}</p>")
+        if snapshot.selinux.pam_configs:
+            html_parts.append(f"<p>PAM configs: {len(snapshot.selinux.pam_configs)}</p>")
+    else:
+        html_parts.append("<p>No SELinux/security customizations detected.</p>")
     html_parts.append("</div>")
 
     # Users/Groups section

@@ -1,7 +1,9 @@
 # rhel2bootc tool image. Run with host root mounted at /host.
-FROM registry.access.redhat.com/ubi9/ubi-minimal:9
+# Fedora base: Red Hat family, no subscription, works on amd64 and aarch64.
+# Use :latest for current stable, or pin e.g. fedora:42 for reproducibility.
+FROM fedora:latest
 
-RUN microdnf install -y python3.11 python3-pip && microdnf clean all
+RUN dnf install -y python3 python3-pip && dnf clean all
 
 WORKDIR /app
 COPY pyproject.toml ./

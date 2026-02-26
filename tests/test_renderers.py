@@ -20,6 +20,8 @@ from rhel2bootc.renderers.secrets_review import render as render_secrets_review
 from rhel2bootc.schema import (
     InspectionSnapshot,
     OsRelease,
+    PackageEntry,
+    RpmSection,
     ServiceSection,
     ServiceStateChange,
 )
@@ -123,6 +125,107 @@ def test_containerfile_renderer(snapshot_from_fixture):
         assert "COPY " in content or "config" in content
 
 
+def test_containerfile_layer_ordering(snapshot_from_fixture):
+    """Containerfile section headers appear in design-doc order."""
+    import re
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        render_containerfile(snapshot_from_fixture, env, output_dir)
+        content = (output_dir / "Containerfile").read_text()
+        headers = re.findall(r"^# === (.+?) ===$", content, re.MULTILINE)
+        DESIGN_ORDER = [
+            "Base Image",
+            "Repository Configuration",
+            "Package Installation",
+            "Service Enablement",
+            "Firewall Configuration",
+            "Scheduled Tasks",
+            "Configuration Files",
+            "Non-RPM Software",
+            "Container Workloads (Quadlet)",
+            "Users and Groups",
+            "Kernel Configuration",
+            "SELinux Customizations",
+            "Network / Kickstart",
+            "tmpfiles.d for /var structure",
+        ]
+        present = [h for h in DESIGN_ORDER if h in headers]
+        for a, b in zip(present, present[1:]):
+            ia = headers.index(a)
+            ib = headers.index(b)
+            assert ia < ib, f"Section '{a}' (pos {ia}) must come before '{b}' (pos {ib})"
+
+
+def test_containerfile_copy_targets_exist(snapshot_from_fixture):
+    """Every COPY in the Containerfile references a file/dir that exists in the output."""
+    import re
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        render_containerfile(snapshot_from_fixture, env, output_dir)
+        content = (output_dir / "Containerfile").read_text()
+        for i, line in enumerate(content.splitlines(), 1):
+            if line.startswith("#"):
+                continue
+            m = re.match(r"^COPY\s+(config/\S+|quadlet/\S*)", line)
+            if m:
+                src = m.group(1)
+                src_path = output_dir / src
+                assert src_path.exists(), f"COPY source missing at line {i}: {src}"
+
+
+def test_containerfile_fixme_comments_are_actionable(snapshot_from_fixture):
+    """Every FIXME comment explains what the operator needs to do (not just 'FIXME')."""
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        render_containerfile(snapshot_from_fixture, env, output_dir)
+        content = (output_dir / "Containerfile").read_text()
+        for i, line in enumerate(content.splitlines(), 1):
+            if "FIXME" in line:
+                after = line.split("FIXME", 1)[1].strip().lstrip(":").strip()
+                assert len(after) > 10, (
+                    f"FIXME at line {i} is not actionable (too short): {line.strip()!r}"
+                )
+
+
+def test_containerfile_syntax_valid(snapshot_from_fixture):
+    """Containerfile uses only valid Dockerfile instructions; parseable by podman build."""
+    import re
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        output_dir = Path(tmp)
+        render_containerfile(snapshot_from_fixture, env, output_dir)
+        content = (output_dir / "Containerfile").read_text()
+        VALID = {"FROM", "RUN", "COPY", "ADD", "ENV", "ARG", "LABEL", "EXPOSE",
+                 "ENTRYPOINT", "CMD", "VOLUME", "USER", "WORKDIR", "ONBUILD",
+                 "STOPSIGNAL", "HEALTHCHECK", "SHELL"}
+        in_continuation = False
+        had_from = False
+        for i, line in enumerate(content.splitlines(), 1):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                in_continuation = False
+                continue
+            if in_continuation:
+                in_continuation = stripped.endswith("\\")
+                continue
+            m = re.match(r"^([A-Z]+)\s", stripped)
+            if m:
+                instr = m.group(1)
+                assert instr in VALID, f"Unknown instruction at line {i}: {instr}"
+                if instr == "FROM":
+                    had_from = True
+                in_continuation = stripped.endswith("\\")
+            else:
+                assert line[0] in (" ", "\t"), (
+                    f"Line {i} is not a valid instruction or continuation: {stripped[:80]!r}"
+                )
+                in_continuation = stripped.endswith("\\")
+        assert had_from, "Containerfile is missing a FROM instruction"
+
+
 def test_audit_report_renderer(snapshot_from_fixture):
     """Audit report renderer produces markdown with summary and sections."""
     env = _make_render_env()
@@ -134,6 +237,60 @@ def test_audit_report_renderer(snapshot_from_fixture):
         content = path.read_text()
         assert "# Audit Report" in content
         assert "Executive Summary" in content
+
+
+def test_renderers_no_baseline_mode():
+    """Containerfile, audit report, and HTML report show no-baseline message when no_baseline=True."""
+    rpm = RpmSection(
+        packages_added=[PackageEntry(name="httpd", version="2.4", release="1.el9", arch="x86_64")],
+        packages_removed=[],
+        no_baseline=True,
+        baseline_package_names=None,
+    )
+    snapshot = InspectionSnapshot(
+        meta={},
+        os_release=OsRelease(name="RHEL", version_id="9.6"),
+        rpm=rpm,
+        config=None,
+        services=None,
+    )
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        render_audit_report(snapshot, env, out)
+        assert "No baseline" in (out / "audit-report.md").read_text()
+        assert "no baseline" in (out / "audit-report.md").read_text().lower()
+        render_containerfile(snapshot, env, out)
+        assert "No baseline" in (out / "Containerfile").read_text()
+        render_html_report(snapshot, env, out)
+        assert "No baseline" in (out / "report.html").read_text()
+
+
+def test_renderers_baseline_available_mode():
+    """With baseline available (no_baseline=False), audit and Containerfile use 'beyond baseline' wording."""
+    rpm = RpmSection(
+        packages_added=[PackageEntry(name="httpd", version="2.4", release="1.el9", arch="x86_64")],
+        packages_removed=[],
+        no_baseline=False,
+        baseline_package_names=["bash", "coreutils"],
+    )
+    snapshot = InspectionSnapshot(
+        meta={},
+        os_release=OsRelease(name="RHEL", version_id="9.6"),
+        rpm=rpm,
+        config=None,
+        services=None,
+    )
+    env = _make_render_env()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        render_audit_report(snapshot, env, out)
+        content = (out / "audit-report.md").read_text()
+        assert "beyond baseline" in content
+        assert "No baseline" not in content
+        render_containerfile(snapshot, env, out)
+        assert "added beyond baseline" in (out / "Containerfile").read_text()
+        assert "No baseline" not in (out / "Containerfile").read_text()
 
 
 def test_html_report_renderer(snapshot_from_fixture):

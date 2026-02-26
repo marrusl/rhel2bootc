@@ -70,6 +70,10 @@ class RpmSection(BaseModel):
     repo_files: List[RepoFile] = Field(default_factory=list)
     dnf_history_removed: List[str] = Field(default_factory=list)  # package names
 
+    # Resolved baseline (cached in snapshot for --from-snapshot re-renders)
+    baseline_package_names: Optional[List[str]] = None
+    no_baseline: bool = False  # True when comps unavailable → all-packages mode
+
 
 # --- Config Inspector ---
 
@@ -125,8 +129,10 @@ class NetworkSection(BaseModel):
 
     connections: List[dict] = Field(default_factory=list)
     firewall_zones: List[dict] = Field(default_factory=list)
+    static_routes: List[dict] = Field(default_factory=list)
     resolv_provenance: str = ""
-    hosts_additions: str = ""
+    hosts_additions: List[str] = Field(default_factory=list)
+    proxy: List[dict] = Field(default_factory=list)
 
 
 class StorageSection(BaseModel):
@@ -165,6 +171,9 @@ class KernelBootSection(BaseModel):
     cmdline: str = ""
     grub_defaults: str = ""
     sysctl_overrides: List[dict] = Field(default_factory=list)
+    modules_load_d: List[str] = Field(default_factory=list)
+    modprobe_d: List[str] = Field(default_factory=list)
+    dracut_conf: List[str] = Field(default_factory=list)
 
 
 class SelinuxSection(BaseModel):
@@ -173,13 +182,18 @@ class SelinuxSection(BaseModel):
     mode: str = ""
     custom_modules: List[str] = Field(default_factory=list)
     boolean_overrides: List[dict] = Field(default_factory=list)
+    audit_rules: List[str] = Field(default_factory=list)
+    fips_mode: bool = False
+    pam_configs: List[str] = Field(default_factory=list)
 
 
 class UserGroupSection(BaseModel):
     """Output of the User/Group inspector."""
 
-    users: List[dict] = Field(default_factory=list)
-    groups: List[dict] = Field(default_factory=list)
+    users: List[dict] = Field(default_factory=list)  # name, uid, gid, shell, home
+    groups: List[dict] = Field(default_factory=list)  # name, gid
+    sudoers_rules: List[str] = Field(default_factory=list)
+    ssh_authorized_keys_refs: List[dict] = Field(default_factory=list)  # user, path
 
 
 # --- Root snapshot ---

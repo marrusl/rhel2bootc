@@ -13,26 +13,23 @@ from ..schema import ConfigFileEntry, ConfigFileKind, ConfigSection, RpmSection
 
 
 def _rpm_owned_paths(executor: Optional[Executor], host_root: Path) -> Set[str]:
-    """Build set of paths under /etc that are owned by some RPM. Uses rpm -qla style output."""
+    """Build set of all RPM-owned paths under /etc in a single bulk query.
+
+    Uses `rpm -qa --queryformat '[%{FILENAMES}\\n]'` to list every file owned by every
+    installed package in one pass, then filters to /etc. This is O(1) RPM queries instead
+    of O(n) per-package queries.
+    """
     if executor is None:
         return set()
-    # Get all files from all packages: rpm -qa then rpm -ql each (expensive). Or use --queryformat to get all at once.
-    # rpm has no single "list all owned paths". We use: rpm -qa --queryformat '%{NAME}\n' | while read p; do rpm -ql $p; done
-    # For fixture we provide a single command that returns a list of paths. So we need executor to support that.
-    # Alternative: in real run, we run a script. For fixture, executor returns content of rpm_qla_output.txt.
-    cmd = ["rpm", "--root", str(host_root), "-qa", "--queryformat", "%{NAME}\n"]
+    cmd = ["rpm", "--root", str(host_root), "-qa", "--queryformat", "[%{FILENAMES}\n]"]
     result = executor(cmd)
     if result.returncode != 0:
         return set()
-    names = [n.strip() for n in result.stdout.strip().splitlines() if n.strip()]
     paths: Set[str] = set()
-    for name in names:
-        ql = executor(["rpm", "--root", str(host_root), "-ql", name])
-        if ql.returncode == 0:
-            for line in ql.stdout.strip().splitlines():
-                p = line.strip()
-                if p.startswith("/etc"):
-                    paths.add(p)
+    for line in result.stdout.splitlines():
+        p = line.strip()
+        if p.startswith("/etc"):
+            paths.add(p)
     return paths
 
 
@@ -181,6 +178,39 @@ def run(
             )
         )
 
-    # 3) Orphaned: configs from removed packages (dnf history). We'd need to know which paths belonged to removed pkgs.
-    # Without rpm -ql for removed packages we can't easily list orphaned paths. Skip for now.
+    # 3) Orphaned configs from removed packages. If dnf history records removed packages,
+    # look for config files that match the package name pattern but aren't RPM-owned.
+    if rpm_section and rpm_section.dnf_history_removed:
+        seen_paths = {e.path for e in section.files}
+        for pkg_name in rpm_section.dnf_history_removed:
+            for pattern_dir in (etc,):
+                try:
+                    for f in pattern_dir.rglob(f"*{pkg_name}*"):
+                        if not f.is_file():
+                            continue
+                        try:
+                            rel = f.relative_to(host_root)
+                            path_str = "/" + str(rel)
+                        except ValueError:
+                            continue
+                        if path_str in seen_paths or path_str in rpm_owned:
+                            continue
+                        seen_paths.add(path_str)
+                        try:
+                            content = f.read_text()
+                        except Exception:
+                            content = ""
+                        section.files.append(
+                            ConfigFileEntry(
+                                path=path_str,
+                                kind=ConfigFileKind.ORPHANED,
+                                content=content,
+                                rpm_va_flags=None,
+                                package=pkg_name,
+                                diff_against_rpm=None,
+                            )
+                        )
+                except Exception:
+                    continue
+
     return section

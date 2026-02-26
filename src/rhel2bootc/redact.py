@@ -25,12 +25,18 @@ EXCLUDED_PATHS = (
 REDACT_PATTERNS: List[Tuple[str, str]] = [
     (r"-----BEGIN\s+.+PRIVATE KEY-----[\s\S]+?-----END\s+.+-----", "PRIVATE_KEY"),
     (r"(?i)(api[_-]?key|apikey)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]{20,})['\"]?", "API_KEY"),
+    (r"(?i)(token)\s*[:=]\s*['\"]?([a-zA-Z0-9_\-]{20,})['\"]?", "TOKEN"),
     (r"(?i)(password|passwd|pass)\s*[:=]\s*['\"]?([^\s'\"]+)['\"]?", "PASSWORD"),
     (r"(?i)secret\s*[:=]\s*['\"]?([^\s'\"]+)['\"]?", "SECRET"),
     (r"(?i)bearer\s+([a-zA-Z0-9_\-\.]{20,})", "BEARER_TOKEN"),
     (r"AKIA[0-9A-Z]{16}", "AWS_KEY"),
+    (r"ghp_[a-zA-Z0-9]{36}", "GITHUB_TOKEN"),
+    (r"ghu_[a-zA-Z0-9]{36}", "GITHUB_TOKEN"),
+    (r"(?i)(?:gcp|google)[_-]?(?:api[_-]?key|credentials?)\s*[:=]\s*['\"]?([^\s'\"]{10,})['\"]?", "GCP_CREDENTIAL"),
+    (r"(?i)(?:azure|az)[_-]?(?:storage[_-]?key|account[_-]?key|secret)\s*[:=]\s*['\"]?([^\s'\"]{10,})['\"]?", "AZURE_CREDENTIAL"),
     (r"(?i)jdbc:[^:]+://[^:]+:([^@\s]+)@", "JDBC_PASSWORD"),
     (r"(?i)postgres(ql)?://[^:]+:([^@\s]+)@", "POSTGRES_PASSWORD"),
+    (r"(?i)mongodb(\+srv)?://[^:]+:([^@\s]+)@", "MONGODB_PASSWORD"),
     (r"(?i)redis://[^:]*:([^@\s]+)@", "REDIS_PASSWORD"),
 ]
 

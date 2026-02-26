@@ -8,6 +8,20 @@ from ..executor import Executor
 from ..schema import ContainerSection
 
 
+def _safe_glob(d: Path, pattern: str) -> List[Path]:
+    try:
+        return list(d.glob(pattern))
+    except (PermissionError, OSError):
+        return []
+
+
+def _safe_rglob(d: Path, pattern: str) -> List[Path]:
+    try:
+        return list(d.rglob(pattern))
+    except (PermissionError, OSError):
+        return []
+
+
 def run(
     host_root: Path,
     executor: Optional[Executor],
@@ -18,24 +32,24 @@ def run(
     for subdir in ("etc/containers/systemd", "usr/share/containers/systemd"):
         d = host_root / subdir
         if d.exists():
-            for f in d.glob("*.container"):
+            for f in _safe_glob(d, "*.container"):
                 try:
                     content = f.read_text()
-                except Exception:
+                except (PermissionError, OSError):
                     content = ""
                 section.quadlet_units.append({
                     "path": str(f.relative_to(host_root)),
                     "name": f.name,
                     "content": content,
                 })
-    for search_dir in ("opt", "srv", "etc"):
+    for search_dir in ("opt", "srv", "home", "etc"):
         d = host_root / search_dir
         if not d.exists():
             continue
-        for f in d.rglob("docker-compose*.yml"):
+        for f in _safe_rglob(d, "docker-compose*.yml"):
             if f.is_file():
                 section.compose_files.append({"path": str(f.relative_to(host_root))})
-        for f in d.rglob("compose*.yaml"):
+        for f in _safe_rglob(d, "compose*.yaml"):
             if f.is_file():
                 section.compose_files.append({"path": str(f.relative_to(host_root))})
     if query_podman and executor:

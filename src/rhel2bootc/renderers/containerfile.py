@@ -67,6 +67,35 @@ def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
             if name and content:
                 (quadlet_dir / name).write_text(content)
 
+    # Non-RPM software files
+    if snapshot.non_rpm_software and snapshot.non_rpm_software.items:
+        for item in snapshot.non_rpm_software.items:
+            path = item.get("path", "")
+            content = item.get("content", "")
+            if path and content:
+                rel = path.lstrip("/")
+                dest = config_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(content)
+
+    # Kernel module / sysctl / dracut configs
+    if snapshot.kernel_boot:
+        for kpath in (snapshot.kernel_boot.modules_load_d or []):
+            dest = config_dir / kpath
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                dest.write_text("")
+        for kpath in (snapshot.kernel_boot.modprobe_d or []):
+            dest = config_dir / kpath
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                dest.write_text("")
+        for kpath in (snapshot.kernel_boot.dracut_conf or []):
+            dest = config_dir / kpath
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if not dest.exists():
+                dest.write_text("")
+
     # tmpfiles.d for /var (and home) directory structure
     tmpfiles_dir = config_dir / "etc/tmpfiles.d"
     tmpfiles_dir.mkdir(parents=True, exist_ok=True)
@@ -86,7 +115,13 @@ def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
 
 
 def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
-    """Build Containerfile content from snapshot."""
+    """Build Containerfile content from snapshot.
+
+    Layer order matches the design doc for cache efficiency:
+      repos → packages → services → firewall → scheduled tasks → configs →
+      non-RPM software → quadlets → users → kernel → SELinux →
+      network note → tmpfiles.d
+    """
     lines = []
     base = _base_image_from_os_release(snapshot)
     lines.append("# === Base Image ===")
@@ -97,7 +132,7 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
     lines.append(f"FROM {base}")
     lines.append("")
 
-    # Repo configuration
+    # 1. Repository Configuration
     if snapshot.rpm and snapshot.rpm.repo_files:
         lines.append("# === Repository Configuration ===")
         lines.append(f"# Detected: {len(snapshot.rpm.repo_files)} repo file(s)")
@@ -106,11 +141,14 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
             lines.append("COPY config/etc/dnf/ /etc/dnf/")
         lines.append("")
 
-    # Package installation
+    # 2. Package Installation
     if snapshot.rpm and snapshot.rpm.packages_added:
         names = sorted(set(p.name for p in snapshot.rpm.packages_added))
         lines.append("# === Package Installation ===")
-        lines.append(f"# Detected: {len(names)} packages added beyond baseline")
+        if getattr(snapshot.rpm, "no_baseline", False):
+            lines.append("# No baseline — including all installed packages")
+        else:
+            lines.append(f"# Detected: {len(names)} packages added beyond baseline")
         lines.append("RUN dnf install -y \\")
         for n in names[:-1]:
             lines.append(f"    {n} \\")
@@ -118,7 +156,7 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         lines.append("    && dnf clean all")
         lines.append("")
 
-    # Service enablement
+    # 3. Service Enablement
     if snapshot.services:
         enabled = snapshot.services.enabled_units
         disabled = snapshot.services.disabled_units
@@ -131,26 +169,14 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
                 lines.append("RUN systemctl disable " + " ".join(disabled))
             lines.append("")
 
-    # Configuration files
-    if snapshot.config and snapshot.config.files:
-        modified = [f for f in snapshot.config.files if f.kind == ConfigFileKind.RPM_OWNED_MODIFIED]
-        unowned = [f for f in snapshot.config.files if f.kind == ConfigFileKind.UNOWNED]
-        has_diffs = any(f.diff_against_rpm for f in snapshot.config.files)
-        lines.append("# === Configuration Files ===")
-        lines.append(f"# Detected: {len(modified)} modified RPM-owned configs, {len(unowned)} unowned configs")
-        if has_diffs:
-            lines.append("# Config diffs (--config-diffs): see audit-report.md and report.html for per-file diffs.")
-        lines.append("COPY config/etc/ /etc/")
-        lines.append("")
-
-    # Firewall (when network has firewall data)
+    # 4. Firewall Configuration
     if snapshot.network and snapshot.network.firewall_zones:
         lines.append("# === Firewall Configuration ===")
         lines.append(f"# Detected: {len(snapshot.network.firewall_zones)} firewall zone(s)/service(s)")
         lines.append("COPY config/etc/firewalld/ /etc/firewalld/")
         lines.append("")
 
-    # Scheduled tasks (generated timer units from cron)
+    # 5. Scheduled Tasks (generated timer units from cron)
     if snapshot.scheduled_tasks and snapshot.scheduled_tasks.generated_timer_units:
         lines.append("# === Scheduled Tasks ===")
         lines.append(f"# Converted from cron: {len(snapshot.scheduled_tasks.generated_timer_units)} timer(s)")
@@ -165,16 +191,42 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         lines.append("# Cron jobs present; no generated timer units (empty cron.d or parse skipped)")
         lines.append("")
 
-    # Non-RPM software
+    # 6. Configuration Files
+    if snapshot.config and snapshot.config.files:
+        modified = [f for f in snapshot.config.files if f.kind == ConfigFileKind.RPM_OWNED_MODIFIED]
+        unowned = [f for f in snapshot.config.files if f.kind == ConfigFileKind.UNOWNED]
+        has_diffs = any(f.diff_against_rpm for f in snapshot.config.files)
+        lines.append("# === Configuration Files ===")
+        lines.append(f"# Detected: {len(modified)} modified RPM-owned configs, {len(unowned)} unowned configs")
+        if has_diffs:
+            lines.append("# Config diffs (--config-diffs): see audit-report.md and report.html for per-file diffs.")
+        for entry in snapshot.config.files:
+            rel = entry.path.lstrip("/")
+            if entry.diff_against_rpm and entry.diff_against_rpm.strip():
+                pkg_label = entry.package or "RPM"
+                diff_lines = [l for l in entry.diff_against_rpm.strip().splitlines() if l.startswith("+") or l.startswith("-")]
+                diff_lines = [l for l in diff_lines if not l.startswith("---") and not l.startswith("+++")]
+                summary = diff_lines[:5]
+                lines.append(f"# Modified from {pkg_label} default:")
+                for sl in summary:
+                    lines.append(f"#   {sl}")
+                if len(diff_lines) > 5:
+                    lines.append(f"#   ... and {len(diff_lines) - 5} more changes")
+                lines.append("# See audit-report.md or report.html for full diff")
+            lines.append(f"COPY config/{rel} /{rel}")
+        lines.append("")
+
+    # 7. Non-RPM Software
     if snapshot.non_rpm_software and snapshot.non_rpm_software.items:
         lines.append("# === Non-RPM Software ===")
-        lines.append("# FIXME: verify installation method for each item")
         for i in snapshot.non_rpm_software.items[:20]:
             path = i.get("path", i.get("name", ""))
+            provenance = i.get("provenance", "unknown")
+            lines.append(f"# FIXME: unknown provenance — determine upstream source and installation method for /{path}")
             lines.append(f"# COPY config/{path} /{path}")
         lines.append("")
 
-    # Container workloads (quadlet)
+    # 8. Container Workloads (Quadlet)
     if snapshot.containers and (snapshot.containers.quadlet_units or snapshot.containers.compose_files):
         lines.append("# === Container Workloads (Quadlet) ===")
         if snapshot.containers.compose_files:
@@ -182,7 +234,7 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         lines.append("COPY quadlet/ /etc/containers/systemd/")
         lines.append("")
 
-    # Users and groups
+    # 9. Users and Groups
     if snapshot.users_groups and (snapshot.users_groups.users or snapshot.users_groups.groups):
         lines.append("# === Users and Groups ===")
         for g in (snapshot.users_groups.groups or [])[:10]:
@@ -191,32 +243,75 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
                 lines.append(f"RUN groupadd -g {gid} {name}")
         for u in (snapshot.users_groups.users or [])[:10]:
             name, uid, gid = u.get("name", ""), u.get("uid", ""), u.get("gid", "")
+            shell = u.get("shell", "")
             if name and uid:
                 gid_opt = f" -g {gid}" if gid else ""
-                lines.append(f"RUN useradd -u {uid}{gid_opt} -m {name}")
+                shell_opt = f" -s {shell}" if shell and shell != "/sbin/nologin" else ""
+                lines.append(f"RUN useradd -u {uid}{gid_opt}{shell_opt} -m {name}")
+        if snapshot.users_groups.ssh_authorized_keys_refs:
+            lines.append("# NOTE: SSH authorized_keys detected — handle manually (do not bake keys into image)")
         lines.append("")
 
-    # Kernel configuration
-    if snapshot.kernel_boot and snapshot.kernel_boot.cmdline:
+    # 10. Kernel Configuration
+    has_kernel = snapshot.kernel_boot and (
+        snapshot.kernel_boot.cmdline or snapshot.kernel_boot.modules_load_d
+        or snapshot.kernel_boot.modprobe_d or snapshot.kernel_boot.dracut_conf
+        or snapshot.kernel_boot.sysctl_overrides
+    )
+    if has_kernel:
         lines.append("# === Kernel Configuration ===")
-        lines.append("# Detected: custom kernel args")
-        lines.append("# RUN rpm-ostree kargs --append=...  # review and add as needed")
+        if snapshot.kernel_boot.cmdline:
+            lines.append("# FIXME: review detected kernel args and add the ones needed for this image")
+            lines.append("# RUN rpm-ostree kargs --append=<key>=<value>")
+        if snapshot.kernel_boot.modules_load_d:
+            lines.append(f"# Detected: {len(snapshot.kernel_boot.modules_load_d)} modules-load.d config(s)")
+            lines.append("COPY config/etc/modules-load.d/ /etc/modules-load.d/")
+        if snapshot.kernel_boot.modprobe_d:
+            lines.append(f"# Detected: {len(snapshot.kernel_boot.modprobe_d)} modprobe.d config(s)")
+            lines.append("COPY config/etc/modprobe.d/ /etc/modprobe.d/")
+        if snapshot.kernel_boot.dracut_conf:
+            lines.append(f"# Detected: {len(snapshot.kernel_boot.dracut_conf)} dracut.conf.d config(s)")
+            lines.append("COPY config/etc/dracut.conf.d/ /etc/dracut.conf.d/")
+        if snapshot.kernel_boot.sysctl_overrides:
+            lines.append(f"# Detected: {len(snapshot.kernel_boot.sysctl_overrides)} sysctl override(s)")
+            lines.append("COPY config/etc/sysctl.d/ /etc/sysctl.d/")
         lines.append("")
 
-    # SELinux
-    if snapshot.selinux and (snapshot.selinux.custom_modules or snapshot.selinux.boolean_overrides):
+    # 11. SELinux Customizations
+    has_selinux = snapshot.selinux and (
+        snapshot.selinux.custom_modules or snapshot.selinux.boolean_overrides
+        or snapshot.selinux.audit_rules or snapshot.selinux.fips_mode
+    )
+    if has_selinux:
         lines.append("# === SELinux Customizations ===")
-        lines.append("# Add COPY config/selinux/ and RUN semodule -i /tmp/selinux/*.pp if custom modules are in config/")
+        if snapshot.selinux.custom_modules:
+            lines.append(f"# FIXME: {len(snapshot.selinux.custom_modules)} custom policy module(s) detected — "
+                         "export .pp files to config/selinux/ and uncomment the COPY + semodule lines below")
+            lines.append("# COPY config/selinux/ /tmp/selinux/")
+            lines.append("# RUN semodule -i /tmp/selinux/*.pp && rm -rf /tmp/selinux/")
+        if snapshot.selinux.boolean_overrides:
+            lines.append(f"# FIXME: {len(snapshot.selinux.boolean_overrides)} custom boolean(s) detected — verify each is still needed")
+            for b in snapshot.selinux.boolean_overrides[:10]:
+                bname = b.get("name", "unknown_bool")
+                bval = b.get("value", "on")
+                lines.append(f"RUN setsebool -P {bname} {bval}")
+        if snapshot.selinux.audit_rules:
+            lines.append(f"# {len(snapshot.selinux.audit_rules)} audit rule file(s) detected")
+            lines.append("COPY config/etc/audit/rules.d/ /etc/audit/rules.d/")
+        if snapshot.selinux.fips_mode:
+            lines.append("# FIXME: host has FIPS mode enabled — enable FIPS in the bootc image via fips-mode-setup")
         lines.append("")
 
-    # tmpfiles.d for /var structure
+    # 12. Network / Kickstart
+    lines.append("# === Network / Kickstart ===")
+    lines.append("# NOTE: Interface-specific config (DHCP, DNS) should be applied via kickstart at deploy time.")
+    lines.append("# FIXME: review kickstart-suggestion.ks for deployment-time config")
+    lines.append("")
+
+    # 13. tmpfiles.d for /var structure
     lines.append("# === tmpfiles.d for /var structure ===")
     lines.append("# Directories created on every boot; /var is not updated by bootc after bootstrap.")
     lines.append("COPY config/etc/tmpfiles.d/ /etc/tmpfiles.d/")
-    lines.append("")
-
-    lines.append("# === Network / Kickstart ===")
-    lines.append("# NOTE: Interface-specific config (DHCP, DNS) should be applied via kickstart at deploy time.")
     lines.append("")
 
     return "\n".join(lines)

@@ -71,15 +71,34 @@ def test_parse_rpm_va():
 
 
 def test_rpm_inspector_with_fixtures(host_root, fixture_executor):
+    """No comps available → no_baseline mode: all installed packages are 'added', tool continues."""
     from rhel2bootc.inspectors.rpm import run as run_rpm
     tool_root = Path(__file__).parent.parent
     section = run_rpm(host_root, fixture_executor, tool_root)
     assert section is not None
+    assert section.no_baseline is True
+    assert section.baseline_package_names is None
     assert len(section.packages_added) > 0
     assert "httpd" in [p.name for p in section.packages_added]
     assert len(section.rpm_va) == 5
     assert len(section.repo_files) >= 1
     assert "old-daemon" in section.dnf_history_removed
+
+
+def test_rpm_inspector_with_comps_file(host_root, fixture_executor):
+    """With --comps-file, baseline is applied; only packages beyond baseline are 'added'."""
+    from rhel2bootc.inspectors.rpm import run as run_rpm
+    comps_file = FIXTURES / "comps_minimal.xml"
+    section = run_rpm(host_root, fixture_executor, comps_file=comps_file)
+    assert section is not None
+    assert section.no_baseline is False
+    assert section.baseline_package_names is not None
+    assert "acl" in section.baseline_package_names
+    assert "bash" in section.baseline_package_names
+    added_names = [p.name for p in section.packages_added]
+    assert "httpd" in added_names
+    assert "acl" not in added_names
+    assert "bash" not in added_names
 
 
 def test_service_inspector_with_fixtures(host_root, fixture_executor):
@@ -160,7 +179,7 @@ def test_selinux_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.selinux import run as run_selinux
     section = run_selinux(host_root, fixture_executor)
     assert section is not None
-    assert any("99-foo" in p for p in section.custom_modules)
+    assert any("99-foo" in p for p in section.audit_rules)
 
 
 def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):
@@ -172,6 +191,7 @@ def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_run_all_with_fixtures(host_root, fixture_executor):
+    """Full run without comps → no_baseline; no-baseline warning added, tool does not exit."""
     tool_root = Path(__file__).parent.parent
     snapshot = run_all(
         host_root,
@@ -185,10 +205,13 @@ def test_run_all_with_fixtures(host_root, fixture_executor):
     assert snapshot.os_release is not None
     assert snapshot.os_release.name == "Red Hat Enterprise Linux"
     assert snapshot.rpm is not None
+    assert snapshot.rpm.no_baseline is True
     assert len(snapshot.rpm.packages_added) > 0
+    rpm_warnings = [w for w in snapshot.warnings if w.get("source") == "rpm"]
+    no_baseline_msg = "Could not fetch comps XML"
+    assert any(no_baseline_msg in w.get("message", "") for w in rpm_warnings)
     assert snapshot.services is not None
     assert snapshot.config is not None
-    # All inspectors run and return sections (may be empty)
     assert snapshot.network is not None
     assert snapshot.storage is not None
     assert snapshot.scheduled_tasks is not None
@@ -197,3 +220,56 @@ def test_run_all_with_fixtures(host_root, fixture_executor):
     assert snapshot.kernel_boot is not None
     assert snapshot.selinux is not None
     assert snapshot.users_groups is not None
+
+
+def test_run_all_minimal_fallback_warning(host_root, fixture_executor):
+    """Comps from file but no kickstart → @minimal fallback; profile warning present, tool continues."""
+    tool_root = Path(__file__).parent.parent
+    comps_file = FIXTURES / "comps_minimal.xml"
+    snapshot = run_all(
+        host_root,
+        executor=fixture_executor,
+        tool_root=tool_root,
+        config_diffs=False,
+        deep_binary_scan=False,
+        query_podman=False,
+        comps_file=comps_file,
+    )
+    assert snapshot.rpm is not None
+    assert snapshot.rpm.no_baseline is False
+    assert snapshot.rpm.baseline_package_names is not None
+    profile_warnings = [w for w in snapshot.warnings if "install profile" in w.get("message", "").lower() or "@minimal" in w.get("message", "")]
+    assert any("@minimal" in w.get("message", "") for w in profile_warnings)
+
+
+def test_snapshot_roundtrip_with_baseline(host_root, fixture_executor):
+    """Resolved baseline is in inspection-snapshot.json; --from-snapshot re-renders without network."""
+    import tempfile
+    from rhel2bootc.pipeline import load_snapshot, save_snapshot
+    from rhel2bootc.renderers import run_all as run_all_renderers
+    tool_root = Path(__file__).parent.parent
+    comps_file = FIXTURES / "comps_minimal.xml"
+    snapshot = run_all(
+        host_root,
+        executor=fixture_executor,
+        tool_root=tool_root,
+        config_diffs=False,
+        deep_binary_scan=False,
+        query_podman=False,
+        comps_file=comps_file,
+    )
+    assert snapshot.rpm is not None
+    assert snapshot.rpm.no_baseline is False
+    assert snapshot.rpm.baseline_package_names is not None
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp)
+        path = out / "inspection-snapshot.json"
+        save_snapshot(snapshot, path)
+        loaded = load_snapshot(path)
+        assert loaded.rpm is not None
+        assert loaded.rpm.baseline_package_names is not None
+        assert loaded.rpm.no_baseline is False
+        run_all_renderers(loaded, out)
+        assert (out / "Containerfile").exists()
+        assert (out / "audit-report.md").exists()
+        assert (out / "report.html").exists()

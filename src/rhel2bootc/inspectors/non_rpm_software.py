@@ -2,7 +2,7 @@
 
 import re
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 from ..executor import Executor
 from ..schema import NonRpmSoftwareSection
@@ -25,7 +25,6 @@ def _is_binary(executor: Optional[Executor], host_root: Path, path: Path) -> boo
 
 
 def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optional[int] = None) -> Optional[str]:
-    """Run strings on path and return first version-like match. If limit_kb set, only first N KB of binary (fast pass)."""
     if not executor:
         return None
     if limit_kb:
@@ -43,6 +42,129 @@ def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optiona
     return None
 
 
+def _safe_iterdir(d: Path) -> list:
+    try:
+        return list(d.iterdir())
+    except (PermissionError, OSError):
+        return []
+
+
+def _scan_dirs(section: NonRpmSoftwareSection, host_root: Path, executor: Optional[Executor], deep: bool) -> None:
+    """Scan /opt and /usr/local for non-RPM software directories."""
+    for base in ("opt", "usr/local"):
+        d = host_root / base
+        if not d.exists():
+            continue
+        for entry in _safe_iterdir(d):
+            if entry.is_dir() and not entry.name.startswith("."):
+                item: dict = {"path": str(entry.relative_to(host_root)), "name": entry.name, "confidence": "low", "method": "directory scan"}
+                if executor:
+                    try:
+                        for f in entry.rglob("*"):
+                            if not f.is_file():
+                                continue
+                            if _is_binary(executor, host_root, f):
+                                limit = None if deep else 4
+                                ver = _strings_version(executor, f, limit_kb=limit)
+                                if ver:
+                                    item["version"] = ver
+                                    item["method"] = "strings" if deep else "strings (first 4KB)"
+                                    item["confidence"] = "medium"
+                                    break
+                    except Exception:
+                        pass
+                section.items.append(item)
+
+
+def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optional[Executor]) -> None:
+    """Detect pip-installed packages by scanning dist-info directories."""
+    for search_root in ("usr/lib/python3", "usr/lib64/python3", "usr/local/lib/python3"):
+        base = host_root / search_root
+        if not base.exists():
+            continue
+        try:
+            for parent in base.iterdir():
+                if not parent.is_dir():
+                    continue
+                site_packages = parent / "site-packages"
+                if not site_packages.exists():
+                    site_packages = parent
+                for dist_info in site_packages.glob("*.dist-info"):
+                    name = dist_info.name.rsplit("-", 1)[0] if "-" in dist_info.name else dist_info.name
+                    version = dist_info.name.rsplit("-", 1)[1].replace(".dist-info", "") if "-" in dist_info.name else ""
+                    section.items.append({
+                        "path": str(dist_info.relative_to(host_root)),
+                        "name": name,
+                        "version": version,
+                        "confidence": "high",
+                        "method": "pip dist-info",
+                    })
+        except Exception:
+            continue
+
+    for venv_root in ("opt", "srv", "home"):
+        d = host_root / venv_root
+        if not d.exists():
+            continue
+        try:
+            for req in d.rglob("requirements.txt"):
+                if req.is_file():
+                    section.items.append({
+                        "path": str(req.relative_to(host_root)),
+                        "name": "requirements.txt",
+                        "confidence": "high",
+                        "method": "pip requirements.txt",
+                    })
+        except Exception:
+            continue
+
+
+def _scan_npm(section: NonRpmSoftwareSection, host_root: Path) -> None:
+    """Detect npm projects by scanning for package-lock.json."""
+    for search_root in ("opt", "srv", "home", "usr/local"):
+        d = host_root / search_root
+        if not d.exists():
+            continue
+        try:
+            for lock in d.rglob("package-lock.json"):
+                if lock.is_file():
+                    section.items.append({
+                        "path": str(lock.parent.relative_to(host_root)),
+                        "name": lock.parent.name,
+                        "confidence": "high",
+                        "method": "npm package-lock.json",
+                    })
+            for lock in d.rglob("yarn.lock"):
+                if lock.is_file():
+                    section.items.append({
+                        "path": str(lock.parent.relative_to(host_root)),
+                        "name": lock.parent.name,
+                        "confidence": "high",
+                        "method": "yarn.lock",
+                    })
+        except Exception:
+            continue
+
+
+def _scan_gem(section: NonRpmSoftwareSection, host_root: Path) -> None:
+    """Detect Ruby gems by scanning for Gemfile.lock."""
+    for search_root in ("opt", "srv", "home", "usr/local"):
+        d = host_root / search_root
+        if not d.exists():
+            continue
+        try:
+            for lock in d.rglob("Gemfile.lock"):
+                if lock.is_file():
+                    section.items.append({
+                        "path": str(lock.parent.relative_to(host_root)),
+                        "name": lock.parent.name,
+                        "confidence": "high",
+                        "method": "gem Gemfile.lock",
+                    })
+        except Exception:
+            continue
+
+
 def run(
     host_root: Path,
     executor: Optional[Executor],
@@ -50,26 +172,10 @@ def run(
 ) -> NonRpmSoftwareSection:
     section = NonRpmSoftwareSection()
     host_root = Path(host_root)
-    for base in ("opt", "usr/local"):
-        d = host_root / base
-        if not d.exists():
-            continue
-        for entry in d.iterdir():
-            if entry.is_dir() and not entry.name.startswith("."):
-                item = {"path": str(entry.relative_to(host_root)), "name": entry.name, "confidence": "low"}
-                if executor and (deep_binary_scan or True):
-                    try:
-                        for f in entry.rglob("*"):
-                            if not f.is_file():
-                                continue
-                            if _is_binary(executor, host_root, f):
-                                limit = None if deep_binary_scan else 4
-                                ver = _strings_version(executor, f, limit_kb=limit)
-                                if ver:
-                                    item["version"] = ver
-                                    item["detected_via"] = "strings" if deep_binary_scan else "strings (first 4KB)"
-                                    break
-                    except Exception:
-                        pass
-                section.items.append(item)
+
+    _scan_dirs(section, host_root, executor, deep_binary_scan)
+    _scan_pip(section, host_root, executor)
+    _scan_npm(section, host_root)
+    _scan_gem(section, host_root)
+
     return section

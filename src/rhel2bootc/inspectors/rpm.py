@@ -1,13 +1,14 @@
 """
 RPM inspector: package list, rpm -Va, repo files, dnf history removed.
-Uses executor for all commands; reads repo files under host_root.
+Baseline is generated from comps XML (fetched or --comps-file); fallback is all-packages mode.
 """
 
 import re
 from pathlib import Path
-from typing import Any, Callable, List, Optional, Set
+from typing import List, Optional, Set
 
-from ..executor import Executor, RunResult
+from ..baseline import get_baseline_packages
+from ..executor import Executor
 from ..schema import (
     PackageEntry,
     PackageState,
@@ -84,19 +85,11 @@ def _parse_rpm_va(stdout: str) -> List[RpmVaEntry]:
     return entries
 
 
-def _load_baseline_packages(manifest_path: Path) -> Set[str]:
-    """Load package names from a baseline manifest JSON."""
-    import json
-    data = json.loads(manifest_path.read_text())
-    return set(data.get("packages", []))
-
-
-def _find_baseline_manifest(host_root: Path, tool_root: Optional[Path] = None) -> Optional[Path]:
-    """Resolve os-release from host and return path to baseline manifest if we have one."""
+def _read_os_id_version(host_root: Path) -> tuple[str, str]:
+    """Read ID and VERSION_ID from host os-release. Returns (id, version_id) or ('', '')."""
     os_release = host_root / "etc" / "os-release"
     if not os_release.exists():
-        return None
-    # Parse ID and VERSION_ID
+        return "", ""
     id_val = ""
     version_id = ""
     for line in os_release.read_text().splitlines():
@@ -104,22 +97,7 @@ def _find_baseline_manifest(host_root: Path, tool_root: Optional[Path] = None) -
             id_val = line.split("=", 1)[1].strip().strip('"')
         elif line.startswith("VERSION_ID="):
             version_id = line.split("=", 1)[1].strip().strip('"')
-    if not id_val or not version_id:
-        return None
-    # Map to manifest path: rhel -> rhel, centos stream -> centos-stream
-    if id_val == "rhel":
-        distro = "rhel"
-    elif "centos" in id_val.lower():
-        distro = "centos-stream"
-    else:
-        return None
-    # Tool root: directory containing manifests (e.g. project root or /app in container)
-    if tool_root is None:
-        tool_root = Path(__file__).resolve().parent.parent.parent.parent
-    manifest = tool_root / "manifests" / distro / version_id / "minimal.json"
-    if manifest.exists():
-        return manifest
-    return None
+    return id_val, version_id
 
 
 def _collect_repo_files(host_root: Path) -> List[RepoFile]:
@@ -177,10 +155,11 @@ def run(
     host_root: Path,
     executor: Optional[Executor],
     tool_root: Optional[Path] = None,
+    comps_file: Optional[Path] = None,
 ) -> RpmSection:
     """
-    Run RPM inspection. If executor is None, only repo files from host_root are collected
-    (caller uses fixture data for rpm/dnf commands).
+    Run RPM inspection. Baseline is from comps XML (--comps-file or fetch from repos);
+    if unavailable, no_baseline=True and all installed packages are treated as added.
     """
     host_root = Path(host_root)
     section = RpmSection()
@@ -188,7 +167,6 @@ def run(
     # 1) rpm -qa
     if executor is not None:
         cmd_qa = ["rpm", "-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
-        # With --root for containerized inspection
         if str(host_root) != "/":
             cmd_qa = ["rpm", "--root", str(host_root), "-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
         result_qa = executor(cmd_qa)
@@ -196,26 +174,43 @@ def run(
     else:
         installed = []
 
-    # 2) Baseline diff (added = installed not in baseline, removed = baseline not installed)
-    # packages_modified is for config-modified packages; we fill from rpm_va package resolution if needed
-    baseline_path = _find_baseline_manifest(host_root, tool_root)
-    if baseline_path and installed:
-        baseline_names = _load_baseline_packages(baseline_path)
+    # 2) Baseline from comps (or all-packages fallback)
+    id_val, version_id = _read_os_id_version(host_root)
+    baseline_names: Optional[Set[str]] = None
+    section.no_baseline = False
+    if id_val and version_id:
+        baseline_set, _profile_used, no_baseline = get_baseline_packages(
+            host_root, id_val, version_id, comps_file=comps_file
+        )
+        if no_baseline:
+            section.no_baseline = True
+            baseline_names = set()
+        else:
+            baseline_names = baseline_set
+    else:
+        section.no_baseline = True
+        baseline_names = set()
+
+    if installed:
         installed_names = {p.name for p in installed}
-        added_names = installed_names - baseline_names
-        removed_names = baseline_names - installed_names
-        for p in installed:
-            if p.name in added_names:
+        if baseline_names is not None and not section.no_baseline:
+            added_names = installed_names - baseline_names
+            removed_names = baseline_names - installed_names
+            section.baseline_package_names = sorted(baseline_names)
+            for p in installed:
+                if p.name in added_names:
+                    p.state = PackageState.ADDED
+                    section.packages_added.append(p)
+            for name in removed_names:
+                section.packages_removed.append(
+                    PackageEntry(name=name, epoch="0", version="", release="", arch="noarch", state=PackageState.REMOVED)
+                )
+        else:
+            # All-packages mode: everything is added
+            section.baseline_package_names = None
+            for p in installed:
                 p.state = PackageState.ADDED
                 section.packages_added.append(p)
-        for name in removed_names:
-            section.packages_removed.append(
-                PackageEntry(name=name, epoch="0", version="", release="", arch="noarch", state=PackageState.REMOVED)
-            )
-    elif installed:
-        for p in installed:
-            p.state = PackageState.ADDED
-            section.packages_added.append(p)
 
     # 3) rpm -Va
     if executor is not None:
