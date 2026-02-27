@@ -92,18 +92,30 @@ def _validate_supported_host(os_release: Optional[OsRelease], tool_root: Path) -
 
 def _profile_warning(host_root: Path) -> Optional[str]:
     """If install profile could not be determined, return warning message."""
+    import os
+    _dbg = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
     for p in ("root/anaconda-ks.cfg", "root/original-ks.cfg"):
+        full = host_root / p
         try:
-            if (host_root / p).exists():
+            exists = full.exists()
+            if _dbg:
+                print(f"[rhel2bootc] _profile_warning: {full} exists={exists}", file=sys.stderr)
+            if exists:
                 return None
-        except (PermissionError, OSError):
+        except (PermissionError, OSError) as exc:
+            if _dbg:
+                print(f"[rhel2bootc] _profile_warning: {full} error: {exc}", file=sys.stderr)
             continue
     anaconda = host_root / "var/log/anaconda"
     try:
-        if anaconda.exists() and any(anaconda.iterdir()):
+        a_exists = anaconda.exists()
+        if _dbg:
+            print(f"[rhel2bootc] _profile_warning: {anaconda} exists={a_exists}", file=sys.stderr)
+        if a_exists and any(anaconda.iterdir()):
             return None
-    except (PermissionError, OSError):
-        pass
+    except (PermissionError, OSError) as exc:
+        if _dbg:
+            print(f"[rhel2bootc] _profile_warning: {anaconda} error: {exc}", file=sys.stderr)
     return (
         "Could not determine original install profile. Using '@minimal' baseline. "
         "Some packages reported as 'added' may have been part of the original installation. "

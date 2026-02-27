@@ -141,12 +141,26 @@ def detect_profile(host_root: Path) -> Optional[str]:
         host_root / "root" / "anaconda-ks.cfg",
         host_root / "root" / "original-ks.cfg",
     ]
+    _debug(f"detect_profile: host_root={host_root}")
     for path in candidates:
         try:
-            if not path.exists():
+            exists = path.exists()
+            _debug(f"detect_profile: {path} exists={exists}")
+            if not exists:
+                # exists() returns False both when absent AND when parent dir
+                # is unreadable (PermissionError is swallowed by Path.exists)
+                parent = path.parent
+                try:
+                    parent_exists = parent.exists()
+                    parent_listable = list(parent.iterdir()) if parent_exists else []
+                    _debug(f"detect_profile: parent {parent} exists={parent_exists} listable={len(parent_listable)} entries")
+                except (PermissionError, OSError) as exc:
+                    _debug(f"detect_profile: parent {parent} not accessible: {exc}")
                 continue
             text = path.read_text()
-        except (PermissionError, OSError):
+            _debug(f"detect_profile: read {path} ({len(text)} bytes)")
+        except (PermissionError, OSError) as exc:
+            _debug(f"detect_profile: cannot read {path}: {exc}")
             continue
         in_packages = False
         for line in text.splitlines():
@@ -157,12 +171,14 @@ def detect_profile(host_root: Path) -> Optional[str]:
             if in_packages and line.startswith("%"):
                 break
             if in_packages and line:
-                # @minimal, @server, @core, or just "minimal"
                 if line.startswith("@"):
-                    return line[1:].strip()
+                    profile = line[1:].strip()
+                    _debug(f"detect_profile: found profile=@{profile}")
+                    return profile
                 if re.match(r"^[a-zA-Z0-9_-]+$", line):
+                    _debug(f"detect_profile: found profile={line}")
                     return line
-    # Optional: scan /var/log/anaconda for install logs (more involved)
+    _debug("detect_profile: no profile found in any candidate")
     return None
 
 
