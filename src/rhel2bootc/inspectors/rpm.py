@@ -188,50 +188,19 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
     return removed
 
 
-def _rpm_dep_query(
-    executor: Executor, host_root: Path, tag: str,
-    installed_count: int,
-) -> str:
-    """Run a bulk rpm -qa --queryformat query for a dependency tag.
-
-    Tries chroot first (host's own RPM), then --dbpath, then --root.
-    A result is considered valid only if it has more lines than packages
-    (each package provides/requires multiple capabilities).
-    """
-    fmt = f"[%{{NAME}}\\t%{{{tag}}}\\n]"
-    min_lines = max(installed_count, 50)
-
-    # 1. chroot into host — uses the host's RPM against its own DB
-    cmd = ["chroot", str(host_root), "rpm", "-qa", "--queryformat", fmt]
-    result = executor(cmd)
-    lines = len(result.stdout.splitlines()) if result.stdout else 0
-    _debug(f"dep-expand: chroot rpm {tag}: rc={result.returncode} lines={lines}")
-    if result.returncode == 0 and lines >= min_lines:
-        return result.stdout
-
-    # 2. --dbpath with container's RPM
-    dbpath = str(host_root / "var" / "lib" / "rpm")
-    cmd = ["rpm", "--dbpath", dbpath, "-qa", "--queryformat", fmt]
-    result = executor(cmd)
-    lines = len(result.stdout.splitlines()) if result.stdout else 0
-    _debug(f"dep-expand: --dbpath rpm {tag}: rc={result.returncode} lines={lines}")
-    if result.returncode == 0 and lines >= min_lines:
-        return result.stdout
-
-    # 3. --root with lock redirect
-    cmd = [
-        "rpm", "--root", str(host_root),
-    ] + _RPM_LOCK_DEFINE + [
-        "-qa", "--queryformat", fmt,
-    ]
-    result = executor(cmd)
-    lines = len(result.stdout.splitlines()) if result.stdout else 0
-    _debug(f"dep-expand: --root rpm {tag}: rc={result.returncode} lines={lines}")
-    if result.returncode == 0 and lines >= min_lines:
-        return result.stdout
-
-    _debug(f"dep-expand: all query methods for {tag} returned insufficient data")
-    return ""
+_DEP_SCRIPT = """\
+import rpm, sys
+ts = rpm.TransactionSet()
+mode = sys.argv[1]
+mi = ts.dbMatch()
+for h in mi:
+    name = h['name']
+    deps = h.dsFromHeader(mode)
+    for d in deps:
+        n = d.N()
+        if n and not n.startswith('rpmlib('):
+            sys.stdout.write(name + '\\t' + n + '\\n')
+"""
 
 
 def _expand_baseline_deps(
@@ -242,52 +211,58 @@ def _expand_baseline_deps(
 ) -> Set[str]:
     """Expand the comps baseline by following transitive RPM dependencies.
 
-    Uses two bulk queries against the local RPM database to build a
-    capability->package map and a package->requires map, then walks the
-    graph from *seed_names* to collect every installed package that is
-    a transitive dependency.
+    Runs a small Python script via chroot that uses the host's own
+    python3-rpm bindings to dump all provides and requires mappings.
+    Falls back to rpm queryformat if the host lacks python3-rpm.
     """
-    prov_stdout = _rpm_dep_query(
-        executor, host_root, "PROVIDENAME", len(installed_names),
-    )
+    def _run_dep_script(tag_char: str) -> str:
+        """Run the dep script; tag_char is 'P' for provides, 'R' for requires."""
+        # rpm.RPMSENSE_* or dsFromHeader tag character
+        cmd = [
+            "chroot", str(host_root), "python3", "-c", _DEP_SCRIPT, tag_char,
+        ]
+        result = executor(cmd)
+        lines = len(result.stdout.splitlines()) if result.stdout else 0
+        _debug(f"dep-expand: python3 rpm {tag_char}: rc={result.returncode} lines={lines}")
+        if result.returncode != 0:
+            _debug(f"dep-expand: stderr: {result.stderr.strip()[:300]}")
+        if result.returncode == 0 and lines >= len(installed_names):
+            return result.stdout
+        return ""
+
+    # Provides: capability → set of package names
+    prov_stdout = _run_dep_script("P")
     if not prov_stdout:
         _debug("dep-expand: no provides data, skipping expansion")
         return seed_names
 
     cap_to_pkgs: Dict[str, Set[str]] = defaultdict(set)
-    prov_lines = 0
+    prov_count = 0
     for line in prov_stdout.splitlines():
         parts = line.split("\t", 1)
         if len(parts) == 2 and parts[0] in installed_names:
             cap_to_pkgs[parts[1]].add(parts[0])
-            prov_lines += 1
+            prov_count += 1
 
-    _debug(f"dep-expand: parsed {prov_lines} provide entries "
-           f"for {len(cap_to_pkgs)} unique capabilities")
-    if prov_lines == 0:
-        raw_lines = prov_stdout.splitlines()[:5]
-        _debug(f"dep-expand: no matched provides; first 5 raw lines: {raw_lines}")
-        return seed_names
+    _debug(f"dep-expand: {prov_count} provides for "
+           f"{len(cap_to_pkgs)} unique capabilities")
 
-    req_stdout = _rpm_dep_query(
-        executor, host_root, "REQUIRENAME", len(installed_names),
-    )
+    # Requires: package → set of capabilities
+    req_stdout = _run_dep_script("R")
     if not req_stdout:
         _debug("dep-expand: no requires data, skipping expansion")
         return seed_names
 
     pkg_to_reqs: Dict[str, Set[str]] = defaultdict(set)
-    req_lines = 0
+    req_count = 0
     for line in req_stdout.splitlines():
         parts = line.split("\t", 1)
         if len(parts) == 2 and parts[0] in installed_names:
-            cap = parts[1]
-            if not cap.startswith("rpmlib("):
-                pkg_to_reqs[parts[0]].add(cap)
-                req_lines += 1
+            pkg_to_reqs[parts[0]].add(parts[1])
+            req_count += 1
 
-    _debug(f"dep-expand: parsed {req_lines} require entries "
-           f"for {len(pkg_to_reqs)} packages")
+    _debug(f"dep-expand: {req_count} requires for "
+           f"{len(pkg_to_reqs)} packages")
 
     # BFS from seed packages
     expanded = set(seed_names) & installed_names
