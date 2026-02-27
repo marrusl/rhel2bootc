@@ -121,39 +121,86 @@ def render(
                 lines.append("")
         lines.append("")
 
-    has_network = snapshot.network and (
-        snapshot.network.connections or snapshot.network.firewall_zones
-        or snapshot.network.static_routes or snapshot.network.proxy
-        or snapshot.network.hosts_additions
+    net = snapshot.network
+    has_network = net and (
+        net.connections or net.firewall_zones or net.firewall_direct_rules
+        or net.static_routes or net.ip_routes or net.ip_rules
+        or net.proxy or net.hosts_additions or net.resolv_provenance
     )
     if has_network:
         lines.append("## Network")
         lines.append("")
-        if snapshot.network.connections:
+
+        if net.connections:
+            static_conns = [c for c in net.connections if c.get("method") == "static"]
+            dhcp_conns = [c for c in net.connections if c.get("method") == "dhcp"]
+            other_conns = [c for c in net.connections if c.get("method") not in ("static", "dhcp")]
+
             lines.append("### Connections")
-            for c in snapshot.network.connections:
-                path = (c.get("path") or c.get("name") or "")
-                lines.append(f"- `{path}`")
             lines.append("")
-        if snapshot.network.firewall_zones:
-            lines.append("### Firewall")
-            for z in snapshot.network.firewall_zones:
-                label = (z.get("name") or z.get("path") or "") if isinstance(z, dict) else str(z)
-                lines.append(f"- {label}")
+            if static_conns:
+                lines.append("**Static (bake into image):**")
+                for c in static_conns:
+                    lines.append(f"- `{c.get('name', '')}` — {c.get('type', '')} — `{c.get('path', '')}`")
+            if dhcp_conns:
+                lines.append("**DHCP (kickstart at deploy time):**")
+                for c in dhcp_conns:
+                    lines.append(f"- `{c.get('name', '')}` — {c.get('type', '')} — `{c.get('path', '')}`")
+            if other_conns:
+                lines.append("**Other:**")
+                for c in other_conns:
+                    lines.append(f"- `{c.get('name', '')}` — method={c.get('method', '?')} — `{c.get('path', '')}`")
             lines.append("")
-        if snapshot.network.static_routes:
-            lines.append("### Static routes")
-            for r in snapshot.network.static_routes:
-                lines.append(f"- `{r.get('path') or r.get('name') or ''}`")
+
+        if net.firewall_zones:
+            lines.append("### Firewall zones (bake into image)")
             lines.append("")
-        if snapshot.network.hosts_additions:
+            for z in net.firewall_zones:
+                name = z.get("name", "")
+                services = z.get("services", [])
+                ports = z.get("ports", [])
+                rich = z.get("rich_rules", [])
+                lines.append(f"**{name}:** services={', '.join(services) or '—'} | ports={', '.join(ports) or '—'} | rich rules={len(rich)}")
+                for r in rich[:10]:
+                    lines.append(f"  - `{r[:200]}`")
+            lines.append("")
+
+        if net.firewall_direct_rules:
+            lines.append("### Firewall direct rules (bake into image)")
+            lines.append("")
+            for r in net.firewall_direct_rules:
+                lines.append(f"- `{r.get('chain', '')}` {r.get('ipv', '')} table={r.get('table', '')}: `{r.get('args', '')}`")
+            lines.append("")
+
+        if net.resolv_provenance:
+            lines.append(f"### DNS — resolv.conf provenance: **{net.resolv_provenance}**")
+            lines.append("")
+
+        if net.ip_routes:
+            static_rt = [r for r in net.ip_routes if "proto static" in r]
+            if static_rt:
+                lines.append("### Static routes (from `ip route`)")
+                lines.append("")
+                for r in static_rt:
+                    lines.append(f"- `{r}`")
+                lines.append("")
+
+        if net.ip_rules:
+            lines.append("### Policy routing rules (non-default)")
+            lines.append("")
+            for r in net.ip_rules:
+                lines.append(f"- `{r}`")
+            lines.append("")
+
+        if net.hosts_additions:
             lines.append("### /etc/hosts additions")
-            for h in snapshot.network.hosts_additions:
+            for h in net.hosts_additions:
                 lines.append(f"- `{h}`")
             lines.append("")
-        if snapshot.network.proxy:
+
+        if net.proxy:
             lines.append("### Proxy configuration")
-            for p in snapshot.network.proxy:
+            for p in net.proxy:
                 lines.append(f"- {p.get('source') or ''}: `{p.get('line') or ''}`")
             lines.append("")
 
@@ -187,61 +234,249 @@ def render(
                 lines.append(f"- {lv}")
             lines.append("")
 
-    if snapshot.scheduled_tasks and (snapshot.scheduled_tasks.cron_jobs or snapshot.scheduled_tasks.systemd_timers or snapshot.scheduled_tasks.generated_timer_units):
+    st = snapshot.scheduled_tasks
+    if st and (st.cron_jobs or st.systemd_timers or st.generated_timer_units or st.at_jobs):
         lines.append("## Scheduled tasks")
         lines.append("")
-        for j in (snapshot.scheduled_tasks.cron_jobs or [])[:20]:
-            lines.append(f"- Cron: `{j.get('path') or ''}` ({j.get('source') or ''})")
-        for t in (snapshot.scheduled_tasks.systemd_timers or [])[:20]:
-            label = (t.get("name") or t.get("path") or str(t)) if isinstance(t, dict) else str(t)
-            lines.append(f"- Timer: {label}")
-        for u in (snapshot.scheduled_tasks.generated_timer_units or [])[:20]:
-            lines.append(f"- Generated: {u.get('name') or ''} (from {u.get('source_path') or ''})")
-        lines.append("")
 
-    if snapshot.containers and (snapshot.containers.quadlet_units or snapshot.containers.compose_files or snapshot.containers.running_containers):
+        # Existing systemd timers (grouped by source)
+        local_timers = [t for t in (st.systemd_timers or []) if t.get("source") == "local"]
+        vendor_timers = [t for t in (st.systemd_timers or []) if t.get("source") == "vendor"]
+        if local_timers:
+            lines.append("### Existing systemd timers (local)")
+            lines.append("")
+            lines.append("| Timer | Schedule | ExecStart | Path |")
+            lines.append("|-------|----------|-----------|------|")
+            for t in local_timers:
+                lines.append(f"| {t.get('name', '')} | {t.get('on_calendar', '')} | `{t.get('exec_start', '')}` | `{t.get('path', '')}` |")
+            lines.append("")
+        if vendor_timers:
+            lines.append("### Existing systemd timers (vendor)")
+            lines.append("")
+            lines.append("| Timer | Schedule | ExecStart | Path |")
+            lines.append("|-------|----------|-----------|------|")
+            for t in vendor_timers:
+                lines.append(f"| {t.get('name', '')} | {t.get('on_calendar', '')} | `{t.get('exec_start', '')}` | `{t.get('path', '')}` |")
+            lines.append("")
+
+        # Cron-converted timers
+        if st.generated_timer_units:
+            lines.append("### Cron-converted timers")
+            lines.append("")
+            for u in (st.generated_timer_units or [])[:20]:
+                lines.append(f"- **{u.get('name', '')}** — converted from `{u.get('source_path', '')}` (cron: `{u.get('cron_expr', '')}`)")
+            lines.append("")
+
+        # Raw cron jobs
+        if st.cron_jobs:
+            lines.append("### Cron jobs")
+            lines.append("")
+            for j in (st.cron_jobs or [])[:20]:
+                lines.append(f"- `{j.get('path', '')}` ({j.get('source', '')})")
+            lines.append("")
+
+        # At jobs
+        if st.at_jobs:
+            lines.append("### At jobs")
+            lines.append("")
+            lines.append("| File | User | Command |")
+            lines.append("|------|------|---------|")
+            for a in (st.at_jobs or [])[:20]:
+                cmd = a.get("command", "")
+                if len(cmd) > 80:
+                    cmd = cmd[:77] + "..."
+                lines.append(f"| `{a.get('file', '')}` | {a.get('user', '')} | `{cmd}` |")
+            lines.append("")
+
+    ct = snapshot.containers
+    if ct and (ct.quadlet_units or ct.compose_files or ct.running_containers):
         lines.append("## Container workloads")
         lines.append("")
-        for u in (snapshot.containers.quadlet_units or []):
-            lines.append(f"- Quadlet: `{u.get('path') or u.get('name') or ''}`")
-        for c in (snapshot.containers.compose_files or []):
-            lines.append(f"- Compose: `{c.get('path') or ''}`")
-        for r in (snapshot.containers.running_containers or []):
-            lines.append(f"- Running: {r.get('id') or ''} {r.get('image') or ''} {r.get('status') or ''}")
-        lines.append("")
+
+        if ct.quadlet_units:
+            lines.append("### Quadlet units")
+            lines.append("")
+            lines.append("| Unit | Image | Path |")
+            lines.append("|------|-------|------|")
+            for u in ct.quadlet_units:
+                img = u.get("image", "") or "*none*"
+                lines.append(f"| {u.get('name', '')} | `{img}` | `{u.get('path', '')}` |")
+            lines.append("")
+
+        if ct.compose_files:
+            lines.append("### Compose files")
+            lines.append("")
+            for c in ct.compose_files:
+                lines.append(f"**`{c.get('path', '')}`**")
+                images = c.get("images", [])
+                if images:
+                    lines.append("")
+                    lines.append("| Service | Image |")
+                    lines.append("|---------|-------|")
+                    for img in images:
+                        lines.append(f"| {img.get('service', '')} | `{img.get('image', '')}` |")
+                lines.append("")
+
+        if ct.running_containers:
+            lines.append("### Running containers (podman)")
+            lines.append("")
+            lines.append("| Name | Image | Status |")
+            lines.append("|------|-------|--------|")
+            for r in ct.running_containers:
+                name = r.get("name", r.get("id", "")[:12])
+                lines.append(f"| {name} | `{r.get('image', '')}` | {r.get('status', '')} |")
+            lines.append("")
+
+            for r in ct.running_containers:
+                name = r.get("name", r.get("id", "")[:12])
+                mounts = r.get("mounts", [])
+                networks = r.get("networks", {})
+                env = r.get("env", [])
+                if mounts or networks or env:
+                    lines.append(f"<details><summary>{name} details</summary>")
+                    lines.append("")
+                    if mounts:
+                        lines.append("**Mounts:**")
+                        for m in mounts:
+                            rw = "rw" if m.get("rw", True) else "ro"
+                            lines.append(f"- `{m.get('source', '')}` → `{m.get('destination', '')}` ({m.get('type', '')}, {rw})")
+                    if networks:
+                        lines.append("")
+                        lines.append("**Networks:**")
+                        for net_name, info in networks.items():
+                            lines.append(f"- {net_name}: {info.get('ip', '')}")
+                    if env:
+                        lines.append("")
+                        lines.append("**Environment:**")
+                        for e in env:
+                            if "=" in e and not e.startswith("PATH="):
+                                lines.append(f"- `{e}`")
+                    lines.append("")
+                    lines.append("</details>")
+                    lines.append("")
 
     if snapshot.non_rpm_software and snapshot.non_rpm_software.items:
         lines.append("## Non-RPM software")
         lines.append("")
-        lines.append("| Path / Name | Version | Confidence | Method |")
-        lines.append("|-------------|---------|------------|--------|")
-        for i in snapshot.non_rpm_software.items[:30]:
-            pn = (i.get('path') or i.get('name') or '')
-            ver = (i.get('version') or '—')
-            conf = (i.get('confidence') or 'unknown')
-            method = (i.get('method') or '—')
-            lines.append(f"| `{pn}` | {ver} | {conf} | {method} |")
-        lines.append("")
 
-    has_kernel = snapshot.kernel_boot and (
-        snapshot.kernel_boot.cmdline or snapshot.kernel_boot.sysctl_overrides
-        or snapshot.kernel_boot.modules_load_d or snapshot.kernel_boot.modprobe_d
-        or snapshot.kernel_boot.dracut_conf
+        # Group items by method category
+        elf_items = [i for i in snapshot.non_rpm_software.items if i.get("lang")]
+        venv_items = [i for i in snapshot.non_rpm_software.items if i.get("method") == "python venv"]
+        git_items = [i for i in snapshot.non_rpm_software.items if i.get("method") == "git repository"]
+        pip_items = [i for i in snapshot.non_rpm_software.items if i.get("method") == "pip dist-info"]
+        other_items = [i for i in snapshot.non_rpm_software.items
+                       if not i.get("lang") and i.get("method") not in ("python venv", "git repository", "pip dist-info")]
+
+        if elf_items:
+            lines.append("### Compiled binaries")
+            lines.append("")
+            lines.append("| Path | Language | Linking | Shared Libraries |")
+            lines.append("|------|----------|---------|------------------|")
+            for i in elf_items:
+                linking = "static" if i.get("static") else "dynamic"
+                libs = ", ".join(i.get("shared_libs", [])[:5])
+                if len(i.get("shared_libs", [])) > 5:
+                    libs += " ..."
+                lines.append(f"| `{i.get('path','')}` | {i.get('lang','')} | {linking} | {libs or '—'} |")
+            lines.append("")
+
+        if venv_items:
+            lines.append("### Python virtual environments")
+            lines.append("")
+            for v in venv_items:
+                ssp_label = "**system-site-packages**" if v.get("system_site_packages") else "isolated"
+                lines.append(f"#### `{v.get('path','')}` ({ssp_label})")
+                lines.append("")
+                pkgs = v.get("packages", [])
+                if pkgs:
+                    lines.append("| Package | Version |")
+                    lines.append("|---------|---------|")
+                    for p in pkgs[:20]:
+                        lines.append(f"| {p.get('name','')} | {p.get('version','')} |")
+                    if len(pkgs) > 20:
+                        lines.append(f"| ... | +{len(pkgs)-20} more |")
+                lines.append("")
+
+        if git_items:
+            lines.append("### Git-managed directories")
+            lines.append("")
+            lines.append("| Path | Remote | Branch | Commit |")
+            lines.append("|------|--------|--------|--------|")
+            for i in git_items:
+                commit = i.get("git_commit", "")[:12]
+                lines.append(f"| `{i.get('path','')}` | {i.get('git_remote','')} | {i.get('git_branch','')} | `{commit}` |")
+            lines.append("")
+
+        if pip_items:
+            lines.append("### System pip packages")
+            lines.append("")
+            lines.append("| Package | Version | Path |")
+            lines.append("|---------|---------|------|")
+            for i in pip_items[:20]:
+                lines.append(f"| {i.get('name','')} | {i.get('version','')} | `{i.get('path','')}` |")
+            lines.append("")
+
+        if other_items:
+            lines.append("### Other non-RPM items")
+            lines.append("")
+            lines.append("| Path / Name | Version | Confidence | Method |")
+            lines.append("|-------------|---------|------------|--------|")
+            for i in other_items[:20]:
+                pn = i.get("path") or i.get("name") or ""
+                ver = i.get("version") or "—"
+                conf = i.get("confidence") or "unknown"
+                method = i.get("method") or "—"
+                lines.append(f"| `{pn}` | {ver} | {conf} | {method} |")
+            lines.append("")
+
+    kb = snapshot.kernel_boot
+    has_kernel = kb and (
+        kb.cmdline or kb.sysctl_overrides or kb.non_default_modules
+        or kb.modules_load_d or kb.modprobe_d or kb.dracut_conf
     )
     if has_kernel:
         lines.append("## Kernel and boot")
         lines.append("")
-        if snapshot.kernel_boot.cmdline:
-            lines.append(f"- cmdline: `{snapshot.kernel_boot.cmdline[:200]}`")
-        if snapshot.kernel_boot.grub_defaults:
-            lines.append(f"- GRUB defaults present")
-        for s in (snapshot.kernel_boot.sysctl_overrides or [])[:20]:
-            lines.append(f"- sysctl: `{s.get('path') or ''}`")
-        for m in (snapshot.kernel_boot.modules_load_d or [])[:20]:
+        if kb.cmdline:
+            lines.append(f"- cmdline: `{kb.cmdline[:200]}`")
+        if kb.grub_defaults:
+            lines.append("- GRUB defaults present")
+
+        if kb.non_default_modules:
+            lines.append("")
+            lines.append(f"### Non-default loaded modules ({len(kb.non_default_modules)})")
+            lines.append("")
+            lines.append("| Module | Size | Used by |")
+            lines.append("|--------|------|---------|")
+            for m in kb.non_default_modules[:30]:
+                name = m.get("name", "?")
+                size = m.get("size", "")
+                used = m.get("used_by", "")
+                lines.append(f"| `{name}` | {size} | {used} |")
+            total = len(kb.loaded_modules or [])
+            default_count = total - len(kb.non_default_modules)
+            if default_count > 0:
+                lines.append("")
+                lines.append(f"_{default_count} module(s) at expected defaults (not shown)._")
+
+        if kb.sysctl_overrides:
+            lines.append("")
+            lines.append(f"### Non-default sysctl values ({len(kb.sysctl_overrides)})")
+            lines.append("")
+            lines.append("| Key | Runtime | Default | Source |")
+            lines.append("|-----|---------|---------|--------|")
+            for s in kb.sysctl_overrides[:30]:
+                key = s.get("key", "?")
+                runtime = s.get("runtime", "?")
+                default = s.get("default", "—")
+                source = s.get("source", "")
+                lines.append(f"| `{key}` | **{runtime}** | {default} | `{source}` |")
+
+        for m in (kb.modules_load_d or [])[:20]:
             lines.append(f"- modules-load.d: `{m}`")
-        for m in (snapshot.kernel_boot.modprobe_d or [])[:20]:
+        for m in (kb.modprobe_d or [])[:20]:
             lines.append(f"- modprobe.d: `{m}`")
-        for d in (snapshot.kernel_boot.dracut_conf or [])[:20]:
+        for d in (kb.dracut_conf or [])[:20]:
             lines.append(f"- dracut: `{d}`")
         lines.append("")
 
@@ -257,11 +492,22 @@ def render(
             lines.append(f"- SELinux mode: {snapshot.selinux.mode}")
         if snapshot.selinux.fips_mode:
             lines.append("- FIPS mode: **enabled**")
-        for m in (snapshot.selinux.custom_modules or [])[:20]:
-            lines.append(f"- Custom module: `{m}`")
-        for b in (snapshot.selinux.boolean_overrides or [])[:20]:
-            raw = b.get("raw") or b.get("name") or str(b)
-            lines.append(f"- Boolean: `{raw}`")
+        if snapshot.selinux.custom_modules:
+            lines.append(f"- **Custom policy modules** ({len(snapshot.selinux.custom_modules)}):")
+            for m in snapshot.selinux.custom_modules[:20]:
+                lines.append(f"  - `{m}`")
+        non_default_bools = [b for b in (snapshot.selinux.boolean_overrides or []) if b.get("non_default")]
+        if non_default_bools:
+            lines.append(f"- **Non-default booleans** ({len(non_default_bools)}):")
+            for b in non_default_bools[:30]:
+                name = b.get("name", "?")
+                cur = b.get("current", "?")
+                dflt = b.get("default", "?")
+                desc = b.get("description", "")
+                lines.append(f"  - `{name}` = **{cur}** (default: {dflt}) — {desc}")
+        unchanged_count = len(snapshot.selinux.boolean_overrides or []) - len(non_default_bools)
+        if unchanged_count > 0:
+            lines.append(f"- Unchanged booleans: {unchanged_count} (at default values)")
         if snapshot.selinux.audit_rules:
             lines.append(f"- Audit rule files: {len(snapshot.selinux.audit_rules)}")
             for a in snapshot.selinux.audit_rules[:10]:

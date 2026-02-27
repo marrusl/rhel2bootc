@@ -1,0 +1,14 @@
+abrt
+accountsd
+acct
+afs
+aide
+ajaxterm
+alsa
+amanda
+amtu
+anaconda
+antivirus
+apache
+apcupsd
+myapp

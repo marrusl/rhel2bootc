@@ -20,11 +20,19 @@ def render(
     ]
 
     if snapshot.network:
-        if snapshot.network.connections:
-            lines.append("# --- Network connections detected on source host ---")
-            for c in (snapshot.network.connections or []):
-                name = (c.get("name") or c.get("path") or "eth0")
-                lines.append(f"# network --bootproto=dhcp --device={name}")
+        dhcp_conns = [c for c in (snapshot.network.connections or []) if c.get("method") == "dhcp"]
+        static_conns = [c for c in (snapshot.network.connections or []) if c.get("method") == "static"]
+        if dhcp_conns:
+            lines.append("# --- DHCP connections (deploy-time config) ---")
+            for c in dhcp_conns:
+                name = c.get("name", "eth0")
+                lines.append(f"network --bootproto=dhcp --device={name}")
+            lines.append("")
+        if static_conns:
+            lines.append("# --- Static connections (baked into image — shown here for reference) ---")
+            for c in static_conns:
+                name = c.get("name", "eth0")
+                lines.append(f"# network --bootproto=static --device={name}  # already in image")
             lines.append("")
 
         if snapshot.network.hosts_additions:

@@ -22,12 +22,29 @@ def _base_image_from_os_release(snapshot: InspectionSnapshot) -> str:
     return "registry.redhat.io/rhel9/rhel-bootc:9.6"
 
 
+def _dhcp_connection_paths(snapshot: InspectionSnapshot) -> set:
+    """Return relative paths of NM profiles that are NOT static (DHCP/other).
+
+    These belong in the kickstart, not baked into the image.
+    """
+    paths: set = set()
+    if snapshot.network:
+        for c in (snapshot.network.connections or []):
+            if c.get("method") != "static" and c.get("path"):
+                paths.add(c["path"])
+    return paths
+
+
 def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
     """Write all config files from snapshot to output_dir/config/ preserving paths."""
     config_dir = output_dir / "config"
+    dhcp_paths = _dhcp_connection_paths(snapshot)
+
     if snapshot.config and snapshot.config.files:
         for entry in snapshot.config.files:
             rel = entry.path.lstrip("/")
+            if rel in dhcp_paths:
+                continue
             dest = config_dir / rel
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(entry.content or "")
@@ -38,24 +55,56 @@ def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(repo.content or "")
 
-    # Firewalld zones/services
-    if snapshot.network and snapshot.network.firewall_zones:
-        for z in snapshot.network.firewall_zones:
+    # Firewalld zones and direct rules
+    if snapshot.network:
+        for z in (snapshot.network.firewall_zones or []):
             path = z.get("path", "")
             content = z.get("content", "")
             if path:
                 dest = config_dir / path
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content)
+        if snapshot.network.firewall_direct_rules:
+            import xml.etree.ElementTree as ET
+            direct_el = ET.Element("direct")
+            for r in snapshot.network.firewall_direct_rules:
+                rule_el = ET.SubElement(direct_el, "rule")
+                rule_el.set("priority", r.get("priority", "0"))
+                rule_el.set("table", r.get("table", "filter"))
+                rule_el.set("ipv", r.get("ipv", "ipv4"))
+                rule_el.set("chain", r.get("chain", "INPUT"))
+                rule_el.text = r.get("args", "")
+            dest = config_dir / "etc/firewalld/direct.xml"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text('<?xml version="1.0" encoding="utf-8"?>\n'
+                            + ET.tostring(direct_el, encoding="unicode") + "\n")
 
-    # Generated timer units from cron
-    if snapshot.scheduled_tasks and snapshot.scheduled_tasks.generated_timer_units:
+        # Static NM connection profiles (baked into image)
+        for c in (snapshot.network.connections or []):
+            if c.get("method") == "static":
+                path = c.get("path", "")
+                if path:
+                    dest = config_dir / path
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if not dest.exists():
+                        dest.write_text("")
+
+    # Systemd timer units: cron-generated and existing local timers
+    st = snapshot.scheduled_tasks
+    if st and (st.generated_timer_units or st.systemd_timers):
         systemd_dir = config_dir / "etc/systemd/system"
         systemd_dir.mkdir(parents=True, exist_ok=True)
-        for u in snapshot.scheduled_tasks.generated_timer_units:
+        for u in (st.generated_timer_units or []):
             name = u.get("name", "cron-timer")
             (systemd_dir / f"{name}.timer").write_text(u.get("timer_content", ""))
             (systemd_dir / f"{name}.service").write_text(u.get("service_content", ""))
+        for t in (st.systemd_timers or []):
+            if t.get("source") == "local":
+                name = t.get("name", "")
+                if name and t.get("timer_content"):
+                    (systemd_dir / f"{name}.timer").write_text(t["timer_content"])
+                if name and t.get("service_content"):
+                    (systemd_dir / f"{name}.service").write_text(t["service_content"])
 
     # Quadlet units (content from inspector; older snapshots may have path/name only)
     if snapshot.containers and snapshot.containers.quadlet_units:
@@ -103,6 +152,13 @@ def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             if not dest.exists():
                 dest.write_text("")
+        if snapshot.kernel_boot.sysctl_overrides:
+            sysctl_dir = config_dir / "etc/sysctl.d"
+            sysctl_dir.mkdir(parents=True, exist_ok=True)
+            sysctl_lines = ["# Non-default sysctl values detected by rhel2bootc"]
+            for s in snapshot.kernel_boot.sysctl_overrides:
+                sysctl_lines.append(f"{s['key']} = {s['runtime']}")
+            (sysctl_dir / "99-rhel2bootc.conf").write_text("\n".join(sysctl_lines) + "\n")
 
     # tmpfiles.d for /var (and home) directory structure
     tmpfiles_dir = config_dir / "etc/tmpfiles.d"
@@ -177,38 +233,72 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
                 lines.append("RUN systemctl disable " + " ".join(disabled))
             lines.append("")
 
-    # 4. Firewall Configuration
-    if snapshot.network and snapshot.network.firewall_zones:
-        lines.append("# === Firewall Configuration ===")
-        lines.append(f"# Detected: {len(snapshot.network.firewall_zones)} firewall zone(s)/service(s)")
-        lines.append("COPY config/etc/firewalld/ /etc/firewalld/")
+    # 4. Firewall Configuration (bake into image)
+    net = snapshot.network
+    has_fw = net and (net.firewall_zones or net.firewall_direct_rules)
+    if has_fw:
+        lines.append("# === Firewall Configuration (bake into image) ===")
+        if net.firewall_zones:
+            total_rich = sum(len(z.get("rich_rules", [])) for z in net.firewall_zones)
+            lines.append(f"# Detected: {len(net.firewall_zones)} zone(s)"
+                         + (f", {total_rich} rich rule(s)" if total_rich else ""))
+            lines.append("COPY config/etc/firewalld/zones/ /etc/firewalld/zones/")
+        if net.firewall_direct_rules:
+            lines.append(f"# Detected: {len(net.firewall_direct_rules)} direct rule(s)")
+            lines.append("COPY config/etc/firewalld/direct.xml /etc/firewalld/direct.xml")
         lines.append("")
 
-    # 5. Scheduled Tasks (generated timer units from cron)
-    if snapshot.scheduled_tasks and snapshot.scheduled_tasks.generated_timer_units:
+    # 5. Scheduled Tasks
+    st = snapshot.scheduled_tasks
+    if st and (st.generated_timer_units or st.systemd_timers or st.cron_jobs or st.at_jobs):
         lines.append("# === Scheduled Tasks ===")
-        lines.append(f"# Converted from cron: {len(snapshot.scheduled_tasks.generated_timer_units)} timer(s)")
-        lines.append("COPY config/etc/systemd/system/ /etc/systemd/system/")
-        for u in snapshot.scheduled_tasks.generated_timer_units:
-            name = u.get("name", "")
-            if name:
+
+        local_timers = [t for t in (st.systemd_timers or []) if t.get("source") == "local"]
+        vendor_timers = [t for t in (st.systemd_timers or []) if t.get("source") == "vendor"]
+
+        if local_timers:
+            lines.append(f"# Existing local timers ({len(local_timers)}): bake into image")
+            for t in local_timers:
+                p = t.get("path", "")
+                name = t.get("name", "")
+                lines.append(f"COPY config/{p} /{p}")
+                svc_path = p.replace(".timer", ".service")
+                lines.append(f"COPY config/{svc_path} /{svc_path}")
                 lines.append(f"RUN systemctl enable {name}.timer")
-        lines.append("")
-    elif snapshot.scheduled_tasks and (snapshot.scheduled_tasks.systemd_timers or snapshot.scheduled_tasks.cron_jobs):
-        lines.append("# === Scheduled Tasks ===")
-        lines.append("# Cron jobs present; no generated timer units (empty cron.d or parse skipped)")
+
+        if vendor_timers:
+            lines.append(f"# Vendor timers ({len(vendor_timers)}): already in base image, no action needed")
+            for t in vendor_timers:
+                lines.append(f"#   - {t.get('name', '')} ({t.get('on_calendar', '')})")
+
+        if st.generated_timer_units:
+            lines.append(f"# Converted from cron: {len(st.generated_timer_units)} timer(s)")
+            lines.append("COPY config/etc/systemd/system/ /etc/systemd/system/")
+            for u in st.generated_timer_units:
+                name = u.get("name", "")
+                if name:
+                    lines.append(f"RUN systemctl enable {name}.timer")
+
+        if st.at_jobs:
+            lines.append(f"# FIXME: {len(st.at_jobs)} at job(s) found — convert to systemd timers or cron")
+            for a in st.at_jobs:
+                cmd = a.get("command", "")
+                lines.append(f"#   at job: {cmd}")
+
         lines.append("")
 
     # 6. Configuration Files
+    dhcp_paths = _dhcp_connection_paths(snapshot)
     if snapshot.config and snapshot.config.files:
-        modified = [f for f in snapshot.config.files if f.kind == ConfigFileKind.RPM_OWNED_MODIFIED]
-        unowned = [f for f in snapshot.config.files if f.kind == ConfigFileKind.UNOWNED]
-        has_diffs = any(f.diff_against_rpm for f in snapshot.config.files)
+        config_entries = [f for f in snapshot.config.files if f.path.lstrip("/") not in dhcp_paths]
+        modified = [f for f in config_entries if f.kind == ConfigFileKind.RPM_OWNED_MODIFIED]
+        unowned = [f for f in config_entries if f.kind == ConfigFileKind.UNOWNED]
+        has_diffs = any(f.diff_against_rpm for f in config_entries)
         lines.append("# === Configuration Files ===")
         lines.append(f"# Detected: {len(modified)} modified RPM-owned configs, {len(unowned)} unowned configs")
         if has_diffs:
             lines.append("# Config diffs (--config-diffs): see audit-report.md and report.html for per-file diffs.")
-        for entry in snapshot.config.files:
+        for entry in config_entries:
             rel = entry.path.lstrip("/")
             if entry.diff_against_rpm and entry.diff_against_rpm.strip():
                 pkg_label = entry.package or "RPM"
@@ -233,25 +323,60 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
 
         for item in snapshot.non_rpm_software.items:
             method = item.get("method", "")
-            if method == "pip dist-info" and item.get("version"):
+            lang = item.get("lang", "")
+            path = item.get("path", item.get("name", ""))
+
+            if lang in ("go", "rust"):
+                linking = "statically linked" if item.get("static") else "dynamically linked"
+                lines.append(f"# FIXME: {lang.capitalize()} binary at /{path} ({linking})")
+                lines.append(f"# Obtain source and rebuild for the target image, or COPY the binary directly")
+                lines.append(f"# COPY config/{path} /{path}")
+            elif lang == "c/c++":
+                if item.get("static"):
+                    lines.append(f"# FIXME: static C/C++ binary at /{path} — COPY or rebuild from source")
+                    lines.append(f"# COPY config/{path} /{path}")
+                else:
+                    libs = ", ".join(item.get("shared_libs", [])[:5])
+                    lines.append(f"# FIXME: dynamic C/C++ binary at /{path} — needs: {libs}")
+                    lines.append(f"# COPY config/{path} /{path}")
+            elif method == "python venv":
+                pkgs = item.get("packages", [])
+                ssp = item.get("system_site_packages", False)
+                if ssp:
+                    lines.append(f"# FIXME: venv at /{path} uses --system-site-packages — verify RPM deps are in base image")
+                if pkgs:
+                    lines.append(f"# Python venv at /{path}: {len(pkgs)} package(s)")
+                    lines.append(f"RUN python3 -m venv /{path}")
+                    pkg_specs = " ".join(f'{p["name"]}=={p["version"]}' for p in pkgs if p.get("version"))
+                    if pkg_specs:
+                        lines.append(f"RUN /{path}/bin/pip install {pkg_specs}")
+                else:
+                    lines.append(f"# FIXME: venv at /{path} — no packages detected, verify manually")
+            elif method == "git repository":
+                remote = item.get("git_remote", "")
+                commit = item.get("git_commit", "")
+                branch = item.get("git_branch", "")
+                lines.append(f"# Git-managed: /{path}")
+                if remote:
+                    lines.append(f"# FIXME: clone from {remote} (branch: {branch}, commit: {commit[:12]})")
+                    lines.append(f"# RUN git clone {remote} /{path} && cd /{path} && git checkout {commit[:12]}")
+                else:
+                    lines.append(f"# FIXME: git repo at /{path} has no remote — COPY or reconstruct")
+            elif method == "pip dist-info" and item.get("version"):
                 pip_packages.append((item["name"], item["version"]))
             elif method == "pip requirements.txt":
-                path = item.get("path", "")
                 lines.append(f"# FIXME: verify pip packages in /{path} install correctly from PyPI")
                 lines.append(f"COPY config/{path} /{path}")
                 lines.append(f"RUN pip install -r /{path}")
             elif method == "npm package-lock.json":
-                path = item.get("path", "")
                 lines.append(f"# FIXME: verify npm packages in /{path} install correctly")
                 lines.append(f"COPY config/{path}/ /{path}/")
                 lines.append(f"RUN cd /{path} && npm ci")
             elif method == "yarn.lock":
-                path = item.get("path", "")
                 lines.append(f"# FIXME: verify yarn packages in /{path} install correctly")
                 lines.append(f"COPY config/{path}/ /{path}/")
                 lines.append(f"RUN cd /{path} && yarn install --frozen-lockfile")
             elif method == "gem Gemfile.lock":
-                path = item.get("path", "")
                 lines.append(f"# FIXME: verify Ruby gems in /{path} install correctly")
                 lines.append(f"COPY config/{path}/ /{path}/")
                 lines.append(f"RUN cd /{path} && bundle install")
@@ -302,27 +427,31 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         lines.append("")
 
     # 10. Kernel Configuration
-    has_kernel = snapshot.kernel_boot and (
-        snapshot.kernel_boot.cmdline or snapshot.kernel_boot.modules_load_d
-        or snapshot.kernel_boot.modprobe_d or snapshot.kernel_boot.dracut_conf
-        or snapshot.kernel_boot.sysctl_overrides
+    kb = snapshot.kernel_boot
+    has_kernel = kb and (
+        kb.cmdline or kb.modules_load_d or kb.modprobe_d
+        or kb.dracut_conf or kb.sysctl_overrides or kb.non_default_modules
     )
     if has_kernel:
         lines.append("# === Kernel Configuration ===")
-        if snapshot.kernel_boot.cmdline:
+        if kb.cmdline:
             lines.append("# FIXME: review detected kernel args and add the ones needed for this image")
             lines.append("# RUN rpm-ostree kargs --append=<key>=<value>")
-        if snapshot.kernel_boot.modules_load_d:
-            lines.append(f"# Detected: {len(snapshot.kernel_boot.modules_load_d)} modules-load.d config(s)")
+        if kb.non_default_modules:
+            names = ", ".join(m.get("name", "?") for m in kb.non_default_modules[:10])
+            lines.append(f"# {len(kb.non_default_modules)} non-default kernel module(s) loaded at runtime: {names}")
+            lines.append("# FIXME: if these modules are needed, add them to /etc/modules-load.d/ in the image")
+        if kb.modules_load_d:
+            lines.append(f"# Detected: {len(kb.modules_load_d)} modules-load.d config(s)")
             lines.append("COPY config/etc/modules-load.d/ /etc/modules-load.d/")
-        if snapshot.kernel_boot.modprobe_d:
-            lines.append(f"# Detected: {len(snapshot.kernel_boot.modprobe_d)} modprobe.d config(s)")
+        if kb.modprobe_d:
+            lines.append(f"# Detected: {len(kb.modprobe_d)} modprobe.d config(s)")
             lines.append("COPY config/etc/modprobe.d/ /etc/modprobe.d/")
-        if snapshot.kernel_boot.dracut_conf:
-            lines.append(f"# Detected: {len(snapshot.kernel_boot.dracut_conf)} dracut.conf.d config(s)")
+        if kb.dracut_conf:
+            lines.append(f"# Detected: {len(kb.dracut_conf)} dracut.conf.d config(s)")
             lines.append("COPY config/etc/dracut.conf.d/ /etc/dracut.conf.d/")
-        if snapshot.kernel_boot.sysctl_overrides:
-            lines.append(f"# Detected: {len(snapshot.kernel_boot.sysctl_overrides)} sysctl override(s)")
+        if kb.sysctl_overrides:
+            lines.append(f"# Detected: {len(kb.sysctl_overrides)} non-default sysctl value(s)")
             lines.append("COPY config/etc/sysctl.d/ /etc/sysctl.d/")
         lines.append("")
 
@@ -338,11 +467,12 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
                          "export .pp files to config/selinux/ and uncomment the COPY + semodule lines below")
             lines.append("# COPY config/selinux/ /tmp/selinux/")
             lines.append("# RUN semodule -i /tmp/selinux/*.pp && rm -rf /tmp/selinux/")
-        if snapshot.selinux.boolean_overrides:
-            lines.append(f"# FIXME: {len(snapshot.selinux.boolean_overrides)} custom boolean(s) detected — verify each is still needed")
-            for b in snapshot.selinux.boolean_overrides[:10]:
+        non_default = [b for b in snapshot.selinux.boolean_overrides if b.get("non_default")]
+        if non_default:
+            lines.append(f"# FIXME: {len(non_default)} non-default boolean(s) detected — verify each is still needed")
+            for b in non_default[:20]:
                 bname = b.get("name", "unknown_bool")
-                bval = b.get("value", "on")
+                bval = b.get("current", "on")
                 lines.append(f"RUN setsebool -P {bname} {bval}")
         if snapshot.selinux.audit_rules:
             lines.append(f"# {len(snapshot.selinux.audit_rules)} audit rule file(s) detected")
@@ -353,8 +483,28 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
 
     # 12. Network / Kickstart
     lines.append("# === Network / Kickstart ===")
-    lines.append("# NOTE: Interface-specific config (DHCP, DNS) should be applied via kickstart at deploy time.")
-    lines.append("# FIXME: review kickstart-suggestion.ks for deployment-time config")
+    if net and net.connections:
+        static_conns = [c for c in net.connections if c.get("method") == "static"]
+        dhcp_conns = [c for c in net.connections if c.get("method") == "dhcp"]
+        if static_conns:
+            names = ", ".join(c.get("name", "") for c in static_conns)
+            lines.append(f"# Static connections (baked into image): {names}")
+            lines.append("COPY config/etc/NetworkManager/system-connections/ /etc/NetworkManager/system-connections/")
+        if dhcp_conns:
+            names = ", ".join(c.get("name", "") for c in dhcp_conns)
+            lines.append(f"# DHCP connections (kickstart at deploy time): {names}")
+            lines.append("# FIXME: configure these interfaces via kickstart — see kickstart-suggestion.ks")
+    else:
+        lines.append("# NOTE: Interface-specific config (DHCP, DNS) should be applied via kickstart at deploy time.")
+        lines.append("# FIXME: review kickstart-suggestion.ks for deployment-time config")
+    if net and net.resolv_provenance:
+        prov = net.resolv_provenance
+        if prov == "networkmanager":
+            lines.append("# resolv.conf: NM-managed — DNS assigned at deploy time via DHCP/kickstart")
+        elif prov == "systemd-resolved":
+            lines.append("# resolv.conf: systemd-resolved — DNS assigned at deploy time")
+        else:
+            lines.append("# resolv.conf: hand-edited — review whether to bake into image or manage at deploy")
     lines.append("")
 
     # 13. tmpfiles.d for /var structure

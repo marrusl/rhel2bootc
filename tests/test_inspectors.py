@@ -30,6 +30,42 @@ def _fixture_executor(cmd, cwd=None):
         return RunResult(stdout=(FIXTURES / "rpm_qla_output.txt").read_text(), stderr="", returncode=0)
     if "systemctl" in cmd and "list-unit-files" in cmd:
         return RunResult(stdout=(FIXTURES / "systemctl_list_unit_files.txt").read_text(), stderr="", returncode=0)
+    if "semodule" in cmd and "-l" in cmd:
+        return RunResult(stdout=(FIXTURES / "semodule_l_output.txt").read_text(), stderr="", returncode=0)
+    if "semanage" in cmd and "boolean" in cmd:
+        return RunResult(stdout=(FIXTURES / "semanage_boolean_l_output.txt").read_text(), stderr="", returncode=0)
+    if "lsmod" in cmd:
+        return RunResult(stdout=(FIXTURES / "lsmod_output.txt").read_text(), stderr="", returncode=0)
+    if "ip" in cmd and "route" in cmd:
+        return RunResult(stdout=(FIXTURES / "ip_route_output.txt").read_text(), stderr="", returncode=0)
+    if "ip" in cmd and "rule" in cmd:
+        return RunResult(stdout=(FIXTURES / "ip_rule_output.txt").read_text(), stderr="", returncode=0)
+    if "podman" in cmd and "ps" in cmd:
+        return RunResult(stdout=(FIXTURES / "podman_ps_output.json").read_text(), stderr="", returncode=0)
+    if "podman" in cmd and "inspect" in cmd:
+        return RunResult(stdout=(FIXTURES / "podman_inspect_output.json").read_text(), stderr="", returncode=0)
+    if "readelf" in cmd and "-S" in cmd:
+        if "go-server" in cmd_str:
+            return RunResult(stdout=(FIXTURES / "readelf_go_sections.txt").read_text(), stderr="", returncode=0)
+        if "rust-worker" in cmd_str:
+            return RunResult(stdout=(FIXTURES / "readelf_rust_sections.txt").read_text(), stderr="", returncode=0)
+        return RunResult(stdout="", stderr="not an ELF", returncode=1)
+    if "readelf" in cmd and "-d" in cmd:
+        if "go-server" in cmd_str:
+            return RunResult(stdout=(FIXTURES / "readelf_go_dynamic.txt").read_text(), stderr="", returncode=0)
+        if "rust-worker" in cmd_str:
+            return RunResult(stdout=(FIXTURES / "readelf_rust_dynamic.txt").read_text(), stderr="", returncode=0)
+        return RunResult(stdout="", stderr="not an ELF", returncode=1)
+    if "file" in cmd and "-b" in cmd:
+        if "go-server" in cmd_str or "rust-worker" in cmd_str:
+            return RunResult(stdout="ELF 64-bit LSB executable", stderr="", returncode=0)
+        return RunResult(stdout="ASCII text", stderr="", returncode=0)
+    if "pip" in cmd and "list" in cmd and "--path" in cmd:
+        if "webapp" in cmd_str:
+            return RunResult(stdout=(FIXTURES / "pip_list_webapp.txt").read_text(), stderr="", returncode=0)
+        if "analytics" in cmd_str:
+            return RunResult(stdout=(FIXTURES / "pip_list_analytics.txt").read_text(), stderr="", returncode=0)
+        return RunResult(stdout="", stderr="", returncode=1)
     return RunResult(stdout="", stderr="unknown command", returncode=1)
 
 
@@ -127,9 +163,48 @@ def test_network_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.network import run as run_network
     section = run_network(host_root, fixture_executor)
     assert section is not None
-    assert hasattr(section, "connections") and isinstance(section.connections, list)
-    assert hasattr(section, "firewall_zones") and isinstance(section.firewall_zones, list)
-    assert section.resolv_provenance == "file"
+
+    # --- Connection classification ---
+    assert len(section.connections) >= 2
+    conn_map = {c["name"]: c for c in section.connections}
+    assert "eth0" in conn_map
+    assert conn_map["eth0"]["method"] == "dhcp"
+    assert conn_map["eth0"]["type"] == "802-3-ethernet"
+    assert "mgmt0" in conn_map
+    assert conn_map["mgmt0"]["method"] == "static"
+
+    # --- Firewall zones with rich rules ---
+    assert len(section.firewall_zones) >= 2
+    zone_map = {z["name"]: z for z in section.firewall_zones}
+    pub = zone_map["public"]
+    assert "ssh" in pub["services"]
+    assert "8080/tcp" in pub["ports"]
+    assert len(pub["rich_rules"]) == 2
+    assert any("192.168.1.0/24" in r for r in pub["rich_rules"])
+
+    internal = zone_map["internal"]
+    assert "mdns" in internal["services"]
+    assert len(internal["rich_rules"]) == 1
+
+    # --- Firewall direct rules ---
+    assert len(section.firewall_direct_rules) == 2
+    assert any("9090" in r["args"] for r in section.firewall_direct_rules)
+    assert section.firewall_direct_rules[0]["chain"] == "INPUT"
+
+    # --- resolv.conf provenance ---
+    assert section.resolv_provenance == "networkmanager"
+
+    # --- ip route ---
+    assert len(section.ip_routes) >= 3
+    assert any("default via" in r for r in section.ip_routes)
+    assert any("proto static" in r for r in section.ip_routes)
+
+    # --- ip rule (non-default only) ---
+    assert len(section.ip_rules) >= 1
+    assert any("custom_table" in r for r in section.ip_rules)
+    # Default tables (local, main, default) should be filtered out
+    assert not any("lookup local" in r for r in section.ip_rules)
+    assert not any("lookup main" in r for r in section.ip_rules)
 
 
 def test_storage_inspector_with_fixtures(host_root, fixture_executor):
@@ -144,18 +219,78 @@ def test_scheduled_tasks_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.scheduled_tasks import run as run_scheduled_tasks
     section = run_scheduled_tasks(host_root, fixture_executor)
     assert section is not None
+
+    # Cron jobs still detected
     assert any(j["path"].endswith("hourly-job") for j in section.cron_jobs)
     assert len(section.generated_timer_units) >= 1
     assert "OnCalendar" in section.generated_timer_units[0]["timer_content"]
 
+    # Existing systemd timers scanned from /etc and /usr/lib
+    timer_names = [t["name"] for t in section.systemd_timers]
+    assert "certbot-renew" in timer_names, f"expected certbot-renew, got {timer_names}"
+    assert "fstrim" in timer_names, f"expected fstrim, got {timer_names}"
+
+    certbot = next(t for t in section.systemd_timers if t["name"] == "certbot-renew")
+    assert certbot["source"] == "local"
+    assert "00,12:00:00" in certbot["on_calendar"]
+    assert "/usr/bin/certbot" in certbot["exec_start"]
+
+    fstrim = next(t for t in section.systemd_timers if t["name"] == "fstrim")
+    assert fstrim["source"] == "vendor"
+    assert fstrim["on_calendar"] == "weekly"
+
+    # At jobs parsed with command and user
+    assert len(section.at_jobs) >= 1
+    at_job = section.at_jobs[0]
+    assert "cleanup-temp" in at_job["command"]
+    assert at_job["user"] == "root"
+
 
 def test_container_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.container import run as run_container
+
+    # Without podman query
     section = run_container(host_root, fixture_executor, query_podman=False)
     assert section is not None
-    assert len(section.quadlet_units) >= 1
-    assert any("nginx" in u.get("name", "") for u in section.quadlet_units)
-    assert section.quadlet_units[0].get("content", "").strip().startswith("[Unit]")
+
+    # Quadlet units with image references
+    assert len(section.quadlet_units) >= 2
+    unit_map = {u["name"]: u for u in section.quadlet_units}
+    assert "nginx.container" in unit_map
+    assert unit_map["nginx.container"]["image"] == "docker.io/library/nginx:1.25-alpine"
+    assert "redis.container" in unit_map
+    assert unit_map["redis.container"]["image"] == "registry.redhat.io/rhel9/redis-6:latest"
+    assert unit_map["nginx.container"]["content"].strip().startswith("[Unit]")
+
+    # Compose files with parsed image references
+    assert len(section.compose_files) >= 1
+    compose = section.compose_files[0]
+    assert "docker-compose" in compose["path"]
+    svc_images = {img["service"]: img["image"] for img in compose["images"]}
+    assert "web" in svc_images
+    assert "python:3.11-slim" in svc_images["web"]
+    assert "db" in svc_images
+    assert "postgres:16-alpine" in svc_images["db"]
+
+    # No running containers without query_podman
+    assert len(section.running_containers) == 0
+
+    # With podman query
+    section2 = run_container(host_root, fixture_executor, query_podman=True)
+    assert len(section2.running_containers) >= 2
+    rc_map = {c["name"]: c for c in section2.running_containers}
+    assert "nginx-proxy" in rc_map
+    nginx = rc_map["nginx-proxy"]
+    assert nginx["image"] == "docker.io/library/nginx:1.25-alpine"
+    assert len(nginx["mounts"]) >= 1
+    assert nginx["mounts"][0]["destination"] == "/usr/share/nginx/html"
+    assert "podman" in nginx["networks"]
+    assert nginx["networks"]["podman"]["ip"] == "10.88.0.2"
+    assert len(nginx["env"]) >= 1
+
+    redis = rc_map["redis-cache"]
+    assert redis["image"] == "registry.redhat.io/rhel9/redis-6:latest"
+    assert any("REDIS_PASSWORD" in e for e in redis["env"])
 
 
 def test_non_rpm_software_inspector_with_fixtures(host_root, fixture_executor):
@@ -163,21 +298,66 @@ def test_non_rpm_software_inspector_with_fixtures(host_root, fixture_executor):
     section = run_non_rpm_software(host_root, fixture_executor, deep_binary_scan=False)
     assert section is not None
 
+    item_map = {i.get("path", ""): i for i in section.items}
     methods = {i.get("method") for i in section.items}
+
     # Unknown provenance (directory scan)
     assert any(i.get("name") == "dummy" for i in section.items)
-    # pip dist-info with version
+
+    # pip dist-info with version (system-level)
     pip_items = [i for i in section.items if i.get("method") == "pip dist-info"]
     assert len(pip_items) >= 2
     flask = next((i for i in pip_items if i["name"] == "flask"), None)
     assert flask is not None and flask["version"] == "2.3.2"
     requests_ = next((i for i in pip_items if i["name"] == "requests"), None)
     assert requests_ is not None and requests_["version"] == "2.31.0"
+
     # npm with lockfile content
     npm_items = [i for i in section.items if i.get("method") == "npm package-lock.json"]
     assert len(npm_items) >= 1
     assert npm_items[0]["name"] == "myapp"
     assert "package-lock.json" in npm_items[0].get("files", {})
+
+    # readelf: Go binary
+    go_items = [i for i in section.items if i.get("lang") == "go"]
+    assert len(go_items) >= 1, f"Expected Go binary, methods: {methods}"
+    go_item = go_items[0]
+    assert go_item["method"] == "readelf (go)"
+    assert go_item["confidence"] == "high"
+    assert go_item["static"] is True
+
+    # readelf: Rust binary
+    rust_items = [i for i in section.items if i.get("lang") == "rust"]
+    assert len(rust_items) >= 1, f"Expected Rust binary, methods: {methods}"
+    rust_item = rust_items[0]
+    assert rust_item["method"] == "readelf (rust)"
+    assert rust_item["static"] is False
+    assert any("libc" in lib for lib in rust_item.get("shared_libs", []))
+
+    # Venv without system-site-packages
+    venv_items = [i for i in section.items if i.get("method") == "python venv"]
+    assert len(venv_items) >= 2, f"Expected 2 venvs, got {len(venv_items)}"
+    webapp_venv = next((i for i in venv_items if "webapp" in i["path"]), None)
+    assert webapp_venv is not None
+    assert webapp_venv["system_site_packages"] is False
+    assert len(webapp_venv["packages"]) >= 2
+    pkg_names = {p["name"] for p in webapp_venv["packages"]}
+    assert "Django" in pkg_names or "django" in pkg_names.union({n.lower() for n in pkg_names})
+
+    # Venv with system-site-packages
+    analytics_venv = next((i for i in venv_items if "analytics" in i["path"]), None)
+    assert analytics_venv is not None
+    assert analytics_venv["system_site_packages"] is True
+    assert len(analytics_venv["packages"]) >= 1
+
+    # Git-managed directory
+    git_items = [i for i in section.items if i.get("method") == "git repository"]
+    assert len(git_items) >= 1, f"Expected git repo, methods: {methods}"
+    git_item = git_items[0]
+    assert "custom-tool" in git_item["name"]
+    assert git_item["git_remote"] == "https://github.com/example/custom-tool.git"
+    assert len(git_item["git_commit"]) >= 10
+    assert git_item["git_branch"] == "main"
 
 
 def test_kernel_boot_inspector_with_fixtures(host_root, fixture_executor):
@@ -189,12 +369,80 @@ def test_kernel_boot_inspector_with_fixtures(host_root, fixture_executor):
     assert section.grub_defaults != ""
     assert "GRUB_CMDLINE_LINUX" in section.grub_defaults
 
+    # --- lsmod ---
+    assert len(section.loaded_modules) > 0
+    loaded_names = {m["name"] for m in section.loaded_modules}
+    assert "br_netfilter" in loaded_names
+    assert "virtio_net" in loaded_names
+    assert "wireguard" in loaded_names
+
+    # --- non-default modules ---
+    # virtio_net / virtio_blk: in usr/lib/modules-load.d/virtio.conf → default
+    # bonding: in etc/modules-load.d/bonding.conf → explicitly configured
+    # bridge/stp/llc/nf_conntrack/nf_defrag_*/fat/mbcache/jbd2: have used_by → dependencies
+    # br_netfilter, overlay, ip_tables, vfat, ext4, wireguard: non-default
+    nd_names = {m["name"] for m in section.non_default_modules}
+    assert "virtio_net" not in nd_names, "virtio_net is in modules-load.d defaults"
+    assert "virtio_blk" not in nd_names, "virtio_blk is in modules-load.d defaults"
+    assert "bonding" not in nd_names, "bonding is explicitly configured"
+    assert "bridge" not in nd_names, "bridge has used_by → dependency"
+    assert "nf_conntrack" not in nd_names, "nf_conntrack has used_by → dependency"
+    assert "fat" not in nd_names, "fat has used_by → dependency"
+    assert "jbd2" not in nd_names, "jbd2 has used_by → dependency"
+    assert "wireguard" in nd_names, "wireguard: not configured, no dependents"
+    assert "overlay" in nd_names, "overlay: not configured, no dependents"
+    assert "ip_tables" in nd_names, "ip_tables: not configured, no dependents"
+    assert "br_netfilter" in nd_names, "br_netfilter: not configured, no dependents"
+    assert "ext4" in nd_names, "ext4: not configured, no dependents"
+    assert "vfat" in nd_names, "vfat: not configured, no dependents"
+
+    # --- sysctl overrides (only non-default) ---
+    sysctl_keys = {s["key"] for s in section.sysctl_overrides}
+    assert "net.ipv4.ip_forward" in sysctl_keys, "ip_forward differs from default"
+    assert "vm.swappiness" in sysctl_keys, "swappiness differs from default"
+    # kernel.panic is 0 in both default and runtime → should NOT appear
+    assert "kernel.panic" not in sysctl_keys, "kernel.panic is at default value"
+    # net.ipv6.conf.all.forwarding is 0 in both → should NOT appear
+    assert "net.ipv6.conf.all.forwarding" not in sysctl_keys
+
+    # Check values
+    ip_fwd = next(s for s in section.sysctl_overrides if s["key"] == "net.ipv4.ip_forward")
+    assert ip_fwd["runtime"] == "1"
+    assert ip_fwd["default"] == "0"
+    swap = next(s for s in section.sysctl_overrides if s["key"] == "vm.swappiness")
+    assert swap["runtime"] == "10"
+    assert swap["default"] == "30"
+
 
 def test_selinux_inspector_with_fixtures(host_root, fixture_executor):
     from rhel2bootc.inspectors.selinux import run as run_selinux
     section = run_selinux(host_root, fixture_executor)
     assert section is not None
+    assert section.mode == "enforcing"
     assert any("99-foo" in p for p in section.audit_rules)
+
+    # Custom modules: myapp is in priority 400 store
+    assert "myapp" in section.custom_modules
+    # Base modules should NOT appear in custom_modules
+    assert "abrt" not in section.custom_modules
+
+    # Boolean overrides from semanage boolean -l
+    assert len(section.boolean_overrides) > 0
+    names = {b["name"] for b in section.boolean_overrides}
+    # Non-default booleans should be present
+    assert "httpd_can_network_connect" in names
+    assert "httpd_use_nfs" in names
+    assert "virt_sandbox_use_all_caps" in names
+
+    # Non-default booleans carry current/default values
+    httpd_net = next(b for b in section.boolean_overrides if b["name"] == "httpd_can_network_connect")
+    assert httpd_net["current"] == "on"
+    assert httpd_net["default"] == "off"
+    assert httpd_net["non_default"] is True
+
+    # Unchanged booleans should also be in the list (for completeness) but marked non_default=False
+    httpd_cgi = next(b for b in section.boolean_overrides if b["name"] == "httpd_enable_cgi")
+    assert httpd_cgi["non_default"] is False
 
 
 def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):

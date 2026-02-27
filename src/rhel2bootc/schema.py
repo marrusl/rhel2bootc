@@ -127,10 +127,13 @@ class ServiceSection(BaseModel):
 class NetworkSection(BaseModel):
     """Output of the Network inspector."""
 
-    connections: List[dict] = Field(default_factory=list)
-    firewall_zones: List[dict] = Field(default_factory=list)
+    connections: List[dict] = Field(default_factory=list)  # {path, name, method, type}
+    firewall_zones: List[dict] = Field(default_factory=list)  # {path, name, content, services, ports, rich_rules}
+    firewall_direct_rules: List[dict] = Field(default_factory=list)  # {ipv, table, chain, rule}
     static_routes: List[dict] = Field(default_factory=list)
-    resolv_provenance: str = ""
+    ip_routes: List[str] = Field(default_factory=list)  # lines from ip route
+    ip_rules: List[str] = Field(default_factory=list)  # lines from ip rule (non-default only)
+    resolv_provenance: str = ""  # "systemd-resolved", "networkmanager", "hand-edited", or ""
     hosts_additions: List[str] = Field(default_factory=list)
     proxy: List[dict] = Field(default_factory=list)
 
@@ -147,16 +150,17 @@ class ScheduledTaskSection(BaseModel):
     """Output of the Scheduled Task inspector."""
 
     cron_jobs: List[dict] = Field(default_factory=list)
-    systemd_timers: List[dict] = Field(default_factory=list)
+    systemd_timers: List[dict] = Field(default_factory=list)  # {name, on_calendar, exec_start, source, timer_content, service_content}
+    at_jobs: List[dict] = Field(default_factory=list)  # {file, command, user, working_dir}
     generated_timer_units: List[dict] = Field(default_factory=list)  # name, timer_content, service_content, cron_expr
 
 
 class ContainerSection(BaseModel):
     """Output of the Container inspector."""
 
-    quadlet_units: List[dict] = Field(default_factory=list)  # path, name, content (when captured)
-    compose_files: List[dict] = Field(default_factory=list)
-    running_containers: List[dict] = Field(default_factory=list)  # when --query-podman: id, names, image, etc.
+    quadlet_units: List[dict] = Field(default_factory=list)  # path, name, content, image_ref
+    compose_files: List[dict] = Field(default_factory=list)  # path, images: [{service, image}]
+    running_containers: List[dict] = Field(default_factory=list)  # id, names, image, status, mounts, networks, env
 
 
 class NonRpmSoftwareSection(BaseModel):
@@ -170,10 +174,12 @@ class KernelBootSection(BaseModel):
 
     cmdline: str = ""
     grub_defaults: str = ""
-    sysctl_overrides: List[dict] = Field(default_factory=list)
+    sysctl_overrides: List[dict] = Field(default_factory=list)  # {key, runtime, default, source}
     modules_load_d: List[str] = Field(default_factory=list)
     modprobe_d: List[str] = Field(default_factory=list)
     dracut_conf: List[str] = Field(default_factory=list)
+    loaded_modules: List[dict] = Field(default_factory=list)  # all from lsmod: {name, size, used_by}
+    non_default_modules: List[dict] = Field(default_factory=list)  # not in modules-load.d or built-in deps
 
 
 class SelinuxSection(BaseModel):

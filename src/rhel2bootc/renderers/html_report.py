@@ -195,17 +195,30 @@ def _markdown_to_html(md: str) -> str:
 def _summary_counts(snapshot: InspectionSnapshot) -> dict:
     n_network = 0
     if snapshot.network:
-        n_network = len(snapshot.network.connections or []) + len(snapshot.network.firewall_zones or [])
+        n_network = (len(snapshot.network.connections or [])
+                     + len(snapshot.network.firewall_zones or [])
+                     + len(snapshot.network.firewall_direct_rules or [])
+                     + len(snapshot.network.ip_rules or []))
     n_storage = len(snapshot.storage.fstab_entries or []) if snapshot.storage else 0
-    n_scheduled = len(snapshot.scheduled_tasks.cron_jobs or []) + len(snapshot.scheduled_tasks.systemd_timers or []) if snapshot.scheduled_tasks else 0
+    n_scheduled = (len(snapshot.scheduled_tasks.cron_jobs or [])
+                   + len(snapshot.scheduled_tasks.systemd_timers or [])
+                   + len(snapshot.scheduled_tasks.at_jobs or [])
+                   + len(snapshot.scheduled_tasks.generated_timer_units or [])) if snapshot.scheduled_tasks else 0
     n_containers = 0
     if snapshot.containers:
-        n_containers = len(snapshot.containers.quadlet_units or []) + len(snapshot.containers.compose_files or [])
+        n_containers = (len(snapshot.containers.quadlet_units or [])
+                        + len(snapshot.containers.compose_files or [])
+                        + len(snapshot.containers.running_containers or []))
     n_non_rpm = len(snapshot.non_rpm_software.items or []) if snapshot.non_rpm_software else 0
     n_users = len(snapshot.users_groups.users or []) + len(snapshot.users_groups.groups or []) if snapshot.users_groups else 0
     n_kernel = 0
     if snapshot.kernel_boot:
-        n_kernel = (1 if snapshot.kernel_boot.cmdline else 0) + len(snapshot.kernel_boot.sysctl_overrides or []) + len(snapshot.kernel_boot.modules_load_d or []) + len(snapshot.kernel_boot.modprobe_d or []) + len(snapshot.kernel_boot.dracut_conf or [])
+        n_kernel = ((1 if snapshot.kernel_boot.cmdline else 0)
+                    + len(snapshot.kernel_boot.sysctl_overrides or [])
+                    + len(snapshot.kernel_boot.non_default_modules or [])
+                    + len(snapshot.kernel_boot.modules_load_d or [])
+                    + len(snapshot.kernel_boot.modprobe_d or [])
+                    + len(snapshot.kernel_boot.dracut_conf or []))
     n_selinux = 0
     if snapshot.selinux:
         n_selinux = len(snapshot.selinux.custom_modules or []) + len(snapshot.selinux.boolean_overrides or []) + len(snapshot.selinux.audit_rules or []) + (1 if snapshot.selinux.fips_mode else 0)
@@ -490,13 +503,88 @@ th { color: var(--muted); font-weight: 500; }
 
     # Network section
     html_parts.append('<div id="section-network" class="section"><h2>Network</h2>')
-    if snapshot.network and (snapshot.network.connections or snapshot.network.firewall_zones):
-        for c in (snapshot.network.connections or []):
-            label = (c.get('path') or c.get('name') or '')
-            html_parts.append(f"<p><code>{label}</code></p>")
-        for z in (snapshot.network.firewall_zones or []):
-            label = (z.get('name') or z.get('path') or '') if isinstance(z, dict) else str(z)
-            html_parts.append(f"<p>Firewall: {label}</p>")
+    net = snapshot.network
+    if net and (net.connections or net.firewall_zones or net.firewall_direct_rules
+                or net.ip_routes or net.ip_rules or net.resolv_provenance):
+        # --- Connections table ---
+        if net.connections:
+            html_parts.append("<h3>Connections</h3>")
+            html_parts.append('<table class="data-table"><thead><tr>'
+                              '<th>Name</th><th>Method</th><th>Type</th><th>Deployment</th>'
+                              '</tr></thead><tbody>')
+            for c in net.connections:
+                name = c.get("name", "")
+                method = c.get("method", "unknown")
+                ctype = c.get("type", "")
+                if method == "static":
+                    deploy = '<span style="color:#3fb950;font-weight:bold">Bake into image</span>'
+                elif method == "dhcp":
+                    deploy = '<span style="color:#d29922;font-weight:bold">Kickstart at deploy</span>'
+                else:
+                    deploy = '<span style="color:var(--muted)">Review</span>'
+                html_parts.append(f'<tr><td><code>{name}</code></td>'
+                                  f'<td>{method}</td><td>{ctype}</td><td>{deploy}</td></tr>')
+            html_parts.append("</tbody></table>")
+
+        # --- Firewall zones ---
+        if net.firewall_zones:
+            html_parts.append('<h3>Firewall zones <span style="color:#3fb950;font-size:0.8em">(bake into image)</span></h3>')
+            for z in net.firewall_zones:
+                zname = z.get("name", "")
+                services = z.get("services", [])
+                ports = z.get("ports", [])
+                rich = z.get("rich_rules", [])
+                html_parts.append(f"<h4>{zname}</h4>")
+                if services:
+                    html_parts.append(f"<p>Services: <code>{', '.join(services)}</code></p>")
+                if ports:
+                    html_parts.append(f"<p>Ports: <code>{', '.join(ports)}</code></p>")
+                if rich:
+                    html_parts.append(f"<p>Rich rules ({len(rich)}):</p><ul>")
+                    for r in rich:
+                        escaped = r.replace("<", "&lt;").replace(">", "&gt;")
+                        html_parts.append(f"<li><code>{escaped[:300]}</code></li>")
+                    html_parts.append("</ul>")
+
+        # --- Direct rules ---
+        if net.firewall_direct_rules:
+            html_parts.append('<h3>Firewall direct rules <span style="color:#3fb950;font-size:0.8em">(bake into image)</span></h3>')
+            html_parts.append("<ul>")
+            for r in net.firewall_direct_rules:
+                html_parts.append(f"<li>{r.get('ipv','')} {r.get('chain','')}: <code>{r.get('args','')}</code></li>")
+            html_parts.append("</ul>")
+
+        # --- resolv.conf ---
+        if net.resolv_provenance:
+            prov = net.resolv_provenance
+            if prov == "networkmanager":
+                label = "NetworkManager-managed"
+                note = "DHCP-assigned DNS — kickstart at deploy time"
+                color = "#d29922"
+            elif prov == "systemd-resolved":
+                label = "systemd-resolved"
+                note = "system resolver — kickstart at deploy time"
+                color = "#d29922"
+            else:
+                label = "hand-edited"
+                note = "bake /etc/resolv.conf into image or manage at deploy"
+                color = "#3fb950"
+            html_parts.append(f'<h3>DNS</h3><p>resolv.conf provenance: '
+                              f'<span style="color:{color};font-weight:bold">{label}</span> — {note}</p>')
+
+        # --- IP routes / rules ---
+        if net.ip_routes:
+            static_rt = [r for r in net.ip_routes if "proto static" in r]
+            if static_rt:
+                html_parts.append(f"<h3>Static routes ({len(static_rt)})</h3><ul>")
+                for r in static_rt:
+                    html_parts.append(f"<li><code>{r}</code></li>")
+                html_parts.append("</ul>")
+        if net.ip_rules:
+            html_parts.append(f"<h3>Policy routing rules ({len(net.ip_rules)})</h3><ul>")
+            for r in net.ip_rules:
+                html_parts.append(f"<li><code>{r}</code></li>")
+            html_parts.append("</ul>")
     else:
         html_parts.append("<p>No network config captured.</p>")
     html_parts.append("</div>")
@@ -514,71 +602,302 @@ th { color: var(--muted); font-weight: 500; }
 
     # Scheduled tasks section
     html_parts.append('<div id="section-scheduled_tasks" class="section"><h2>Scheduled tasks</h2>')
-    if snapshot.scheduled_tasks and (snapshot.scheduled_tasks.cron_jobs or snapshot.scheduled_tasks.systemd_timers):
-        for j in (snapshot.scheduled_tasks.cron_jobs or []):
-            html_parts.append(f"<p>Cron: <code>{j.get('path') or ''}</code></p>")
-        for t in (snapshot.scheduled_tasks.systemd_timers or []):
-            label = (t.get('name') or t.get('path') or str(t)) if isinstance(t, dict) else str(t)
-            html_parts.append(f"<p>Timer: {label}</p>")
+    st = snapshot.scheduled_tasks
+    has_tasks = st and (st.cron_jobs or st.systemd_timers or st.generated_timer_units or st.at_jobs)
+    if has_tasks:
+        # Existing systemd timers
+        local_timers = [t for t in (st.systemd_timers or []) if t.get("source") == "local"]
+        vendor_timers = [t for t in (st.systemd_timers or []) if t.get("source") == "vendor"]
+        if local_timers or vendor_timers:
+            html_parts.append("<h3>Existing systemd timers</h3>")
+            html_parts.append('<table><tr><th>Timer</th><th>Schedule</th><th>ExecStart</th><th>Source</th></tr>')
+            for t in local_timers:
+                html_parts.append(
+                    f'<tr style="background:#e8f5e9"><td>{t.get("name","")}</td>'
+                    f'<td>{t.get("on_calendar","")}</td>'
+                    f'<td><code>{t.get("exec_start","")}</code></td>'
+                    f'<td><span style="background:#4caf50;color:#fff;padding:2px 8px;border-radius:4px">local</span></td></tr>')
+            for t in vendor_timers:
+                html_parts.append(
+                    f'<tr><td>{t.get("name","")}</td>'
+                    f'<td>{t.get("on_calendar","")}</td>'
+                    f'<td><code>{t.get("exec_start","")}</code></td>'
+                    f'<td><span style="background:#90a4ae;color:#fff;padding:2px 8px;border-radius:4px">vendor</span></td></tr>')
+            html_parts.append("</table>")
+
+        # Cron-converted timers
+        if st.generated_timer_units:
+            html_parts.append("<h3>Cron-converted timers</h3>")
+            html_parts.append('<table><tr><th>Name</th><th>Cron Expression</th><th>Source File</th></tr>')
+            for u in (st.generated_timer_units or []):
+                html_parts.append(
+                    f'<tr style="background:#fff3e0"><td>{u.get("name","")}</td>'
+                    f'<td><code>{u.get("cron_expr","")}</code></td>'
+                    f'<td><code>{u.get("source_path","")}</code></td></tr>')
+            html_parts.append("</table>")
+
+        # Cron jobs
+        if st.cron_jobs:
+            html_parts.append("<h3>Cron jobs</h3>")
+            html_parts.append("<ul>")
+            for j in (st.cron_jobs or []):
+                html_parts.append(f'<li><code>{j.get("path","")}</code> ({j.get("source","")})</li>')
+            html_parts.append("</ul>")
+
+        # At jobs
+        if st.at_jobs:
+            html_parts.append("<h3>At jobs</h3>")
+            html_parts.append('<table><tr><th>File</th><th>User</th><th>Command</th></tr>')
+            for a in (st.at_jobs or []):
+                cmd = a.get("command", "")
+                if len(cmd) > 120:
+                    cmd = cmd[:117] + "..."
+                html_parts.append(
+                    f'<tr><td><code>{a.get("file","")}</code></td>'
+                    f'<td>{a.get("user","")}</td>'
+                    f'<td><code>{cmd}</code></td></tr>')
+            html_parts.append("</table>")
     else:
         html_parts.append("<p>No scheduled tasks.</p>")
     html_parts.append("</div>")
 
     # Containers section
     html_parts.append('<div id="section-containers" class="section"><h2>Containers</h2>')
-    if snapshot.containers and (snapshot.containers.quadlet_units or snapshot.containers.compose_files):
-        for u in (snapshot.containers.quadlet_units or []):
-            html_parts.append(f"<p>Quadlet: <code>{u.get('path') or u.get('name') or ''}</code></p>")
-        for c in (snapshot.containers.compose_files or []):
-            html_parts.append(f"<p>Compose: <code>{c.get('path') or ''}</code></p>")
+    ct = snapshot.containers
+    has_ct = ct and (ct.quadlet_units or ct.compose_files or ct.running_containers)
+    if has_ct:
+        if ct.quadlet_units:
+            html_parts.append("<h3>Quadlet units</h3>")
+            html_parts.append('<table><tr><th>Unit</th><th>Image</th><th>Path</th></tr>')
+            for u in ct.quadlet_units:
+                img = u.get("image", "")
+                img_display = f'<code>{img}</code>' if img else '<em>none</em>'
+                html_parts.append(
+                    f'<tr><td>{u.get("name","")}</td>'
+                    f'<td>{img_display}</td>'
+                    f'<td><code>{u.get("path","")}</code></td></tr>')
+            html_parts.append("</table>")
+
+        if ct.compose_files:
+            html_parts.append("<h3>Compose files</h3>")
+            for c in ct.compose_files:
+                html_parts.append(f'<h4><code>{c.get("path","")}</code></h4>')
+                images = c.get("images", [])
+                if images:
+                    html_parts.append('<table><tr><th>Service</th><th>Image</th></tr>')
+                    for img in images:
+                        html_parts.append(
+                            f'<tr><td>{img.get("service","")}</td>'
+                            f'<td><code>{img.get("image","")}</code></td></tr>')
+                    html_parts.append("</table>")
+                else:
+                    html_parts.append("<p>No image references found.</p>")
+
+        if ct.running_containers:
+            html_parts.append("<h3>Running containers (podman)</h3>")
+            html_parts.append('<table><tr><th>Name</th><th>Image</th><th>Status</th><th>Mounts</th><th>Networks</th></tr>')
+            for r in ct.running_containers:
+                name = r.get("name", r.get("id", "")[:12])
+                mounts = r.get("mounts", [])
+                mount_summary = ", ".join(
+                    f'{m.get("source","")}&rarr;{m.get("destination","")}'
+                    for m in mounts[:3]
+                )
+                if len(mounts) > 3:
+                    mount_summary += f" +{len(mounts)-3} more"
+                networks = r.get("networks", {})
+                net_summary = ", ".join(
+                    f'{n}: {info.get("ip","")}'
+                    for n, info in networks.items()
+                )
+                html_parts.append(
+                    f'<tr><td><strong>{name}</strong></td>'
+                    f'<td><code>{r.get("image","")}</code></td>'
+                    f'<td>{r.get("status","")}</td>'
+                    f'<td style="font-size:0.85em">{mount_summary or "<em>none</em>"}</td>'
+                    f'<td style="font-size:0.85em">{net_summary or "<em>none</em>"}</td></tr>')
+            html_parts.append("</table>")
     else:
         html_parts.append("<p>No container workloads.</p>")
     html_parts.append("</div>")
 
     # Non-RPM section
     html_parts.append('<div id="section-non_rpm" class="section"><h2>Non-RPM software</h2>')
-    if snapshot.non_rpm_software and (snapshot.non_rpm_software.items or []):
-        html_parts.append("<table><thead><tr><th>Path</th><th>Confidence</th></tr></thead><tbody>")
-        for i in (snapshot.non_rpm_software.items or [])[:50]:
-            html_parts.append(f"<tr><td><code>{i.get('path') or i.get('name') or ''}</code></td><td>{i.get('confidence') or ''}</td></tr>")
-        html_parts.append("</tbody></table>")
+    nr = snapshot.non_rpm_software
+    if nr and nr.items:
+        elf_items = [i for i in nr.items if i.get("lang")]
+        venv_items = [i for i in nr.items if i.get("method") == "python venv"]
+        git_items = [i for i in nr.items if i.get("method") == "git repository"]
+        pip_items = [i for i in nr.items if i.get("method") == "pip dist-info"]
+        other_items = [i for i in nr.items
+                       if not i.get("lang") and i.get("method") not in ("python venv", "git repository", "pip dist-info")]
+
+        if elf_items:
+            html_parts.append("<h3>Compiled binaries</h3>")
+            html_parts.append('<table><tr><th>Path</th><th>Language</th><th>Linking</th><th>Shared Libraries</th></tr>')
+            lang_colors = {"go": "#00ADD8", "rust": "#DEA584", "c/c++": "#555"}
+            for i in elf_items:
+                lang = i.get("lang", "")
+                color = lang_colors.get(lang, "#999")
+                linking = "static" if i.get("static") else "dynamic"
+                link_color = "#4caf50" if i.get("static") else "#ff9800"
+                libs = ", ".join(i.get("shared_libs", [])[:5])
+                html_parts.append(
+                    f'<tr><td><code>{i.get("path","")}</code></td>'
+                    f'<td><span style="background:{color};color:#fff;padding:2px 8px;border-radius:4px">{lang}</span></td>'
+                    f'<td><span style="background:{link_color};color:#fff;padding:2px 8px;border-radius:4px">{linking}</span></td>'
+                    f'<td style="font-size:0.85em">{libs or "<em>none</em>"}</td></tr>')
+            html_parts.append("</table>")
+
+        if venv_items:
+            html_parts.append("<h3>Python virtual environments</h3>")
+            for v in venv_items:
+                ssp = v.get("system_site_packages", False)
+                badge = ('<span style="background:#f44336;color:#fff;padding:2px 8px;border-radius:4px">system-site-packages</span>'
+                         if ssp else
+                         '<span style="background:#4caf50;color:#fff;padding:2px 8px;border-radius:4px">isolated</span>')
+                html_parts.append(f'<h4><code>{v.get("path","")}</code> {badge}</h4>')
+                pkgs = v.get("packages", [])
+                if pkgs:
+                    html_parts.append('<table><tr><th>Package</th><th>Version</th></tr>')
+                    for p in pkgs[:20]:
+                        html_parts.append(f'<tr><td>{p.get("name","")}</td><td>{p.get("version","")}</td></tr>')
+                    if len(pkgs) > 20:
+                        html_parts.append(f'<tr><td colspan="2"><em>+{len(pkgs)-20} more</em></td></tr>')
+                    html_parts.append("</table>")
+                else:
+                    html_parts.append("<p>No packages found.</p>")
+
+        if git_items:
+            html_parts.append("<h3>Git-managed directories</h3>")
+            html_parts.append('<table><tr><th>Path</th><th>Remote</th><th>Branch</th><th>Commit</th></tr>')
+            for i in git_items:
+                commit = i.get("git_commit", "")[:12]
+                remote = i.get("git_remote", "")
+                html_parts.append(
+                    f'<tr><td><code>{i.get("path","")}</code></td>'
+                    f'<td><code>{remote}</code></td>'
+                    f'<td>{i.get("git_branch","")}</td>'
+                    f'<td><code>{commit}</code></td></tr>')
+            html_parts.append("</table>")
+
+        if pip_items:
+            html_parts.append("<h3>System pip packages</h3>")
+            html_parts.append('<table><tr><th>Package</th><th>Version</th><th>Path</th></tr>')
+            for i in pip_items[:20]:
+                html_parts.append(
+                    f'<tr><td>{i.get("name","")}</td>'
+                    f'<td>{i.get("version","")}</td>'
+                    f'<td><code>{i.get("path","")}</code></td></tr>')
+            html_parts.append("</table>")
+
+        if other_items:
+            html_parts.append("<h3>Other non-RPM items</h3>")
+            html_parts.append('<table><tr><th>Path</th><th>Confidence</th><th>Method</th></tr>')
+            for i in other_items[:20]:
+                html_parts.append(
+                    f'<tr><td><code>{i.get("path","") or i.get("name","")}</code></td>'
+                    f'<td>{i.get("confidence","")}</td>'
+                    f'<td>{i.get("method","")}</td></tr>')
+            html_parts.append("</table>")
     else:
         html_parts.append("<p>No non-RPM software.</p>")
     html_parts.append("</div>")
 
     # Kernel/Boot section
     html_parts.append('<div id="section-kernel_boot" class="section"><h2>Kernel and boot</h2>')
-    if snapshot.kernel_boot and (snapshot.kernel_boot.cmdline or snapshot.kernel_boot.sysctl_overrides or snapshot.kernel_boot.modules_load_d or snapshot.kernel_boot.modprobe_d or snapshot.kernel_boot.dracut_conf):
-        if snapshot.kernel_boot.cmdline:
-            cmdline_escaped = snapshot.kernel_boot.cmdline[:300].replace("<", "&lt;").replace(">", "&gt;")
+    kb = snapshot.kernel_boot
+    if kb and (kb.cmdline or kb.sysctl_overrides or kb.non_default_modules
+               or kb.modules_load_d or kb.modprobe_d or kb.dracut_conf):
+        if kb.cmdline:
+            cmdline_escaped = kb.cmdline[:300].replace("<", "&lt;").replace(">", "&gt;")
             html_parts.append(f"<p><strong>cmdline:</strong> <code>{cmdline_escaped}</code></p>")
-        if snapshot.kernel_boot.sysctl_overrides:
-            html_parts.append(f"<p>Sysctl overrides: {len(snapshot.kernel_boot.sysctl_overrides)}</p>")
-        if snapshot.kernel_boot.modules_load_d:
-            html_parts.append(f"<p>modules-load.d: {len(snapshot.kernel_boot.modules_load_d)} file(s)</p>")
-        if snapshot.kernel_boot.modprobe_d:
-            html_parts.append(f"<p>modprobe.d: {len(snapshot.kernel_boot.modprobe_d)} file(s)</p>")
-        if snapshot.kernel_boot.dracut_conf:
-            html_parts.append(f"<p>dracut.conf.d: {len(snapshot.kernel_boot.dracut_conf)} file(s)</p>")
+
+        if kb.non_default_modules:
+            total = len(kb.loaded_modules or [])
+            default_count = total - len(kb.non_default_modules)
+            html_parts.append(f"<h3>Non-default loaded modules ({len(kb.non_default_modules)})</h3>")
+            html_parts.append('<table class="data-table"><thead><tr>'
+                              '<th>Module</th><th>Size</th><th>Used by</th>'
+                              '</tr></thead><tbody>')
+            for m in kb.non_default_modules:
+                name = m.get("name", "?")
+                size = m.get("size", "")
+                used = m.get("used_by", "")
+                html_parts.append(f'<tr><td><code>{name}</code></td><td>{size}</td><td>{used}</td></tr>')
+            html_parts.append("</tbody></table>")
+            if default_count > 0:
+                html_parts.append(f"<p>{default_count} module(s) at expected defaults (not shown).</p>")
+
+        if kb.sysctl_overrides:
+            html_parts.append(f"<h3>Non-default sysctl values ({len(kb.sysctl_overrides)})</h3>")
+            html_parts.append('<table class="data-table"><thead><tr>'
+                              '<th>Key</th><th>Runtime</th><th>Default</th><th>Source</th>'
+                              '</tr></thead><tbody>')
+            for s in kb.sysctl_overrides:
+                key = s.get("key", "?")
+                runtime = s.get("runtime", "?")
+                default = s.get("default", "—")
+                source = s.get("source", "")
+                html_parts.append(
+                    f'<tr><td><code>{key}</code></td>'
+                    f'<td style="color:#d29922;font-weight:bold">{runtime}</td>'
+                    f'<td>{default}</td><td><code>{source}</code></td></tr>'
+                )
+            html_parts.append("</tbody></table>")
+
+        if kb.modules_load_d:
+            html_parts.append(f"<p>modules-load.d: {len(kb.modules_load_d)} file(s)</p>")
+        if kb.modprobe_d:
+            html_parts.append(f"<p>modprobe.d: {len(kb.modprobe_d)} file(s)</p>")
+        if kb.dracut_conf:
+            html_parts.append(f"<p>dracut.conf.d: {len(kb.dracut_conf)} file(s)</p>")
     else:
         html_parts.append("<p>No kernel/boot customizations detected.</p>")
     html_parts.append("</div>")
 
     # SELinux section
     html_parts.append('<div id="section-selinux" class="section"><h2>SELinux / Security</h2>')
-    if snapshot.selinux and (snapshot.selinux.mode or snapshot.selinux.custom_modules or snapshot.selinux.boolean_overrides or snapshot.selinux.audit_rules or snapshot.selinux.fips_mode):
-        if snapshot.selinux.mode:
-            html_parts.append(f"<p><strong>Mode:</strong> {snapshot.selinux.mode}</p>")
-        if snapshot.selinux.fips_mode:
+    se = snapshot.selinux
+    if se and (se.mode or se.custom_modules or se.boolean_overrides or se.audit_rules or se.fips_mode):
+        if se.mode:
+            html_parts.append(f"<p><strong>Mode:</strong> {se.mode}</p>")
+        if se.fips_mode:
             html_parts.append("<p><strong>FIPS mode:</strong> enabled</p>")
-        if snapshot.selinux.custom_modules:
-            html_parts.append(f"<p>Custom modules: {len(snapshot.selinux.custom_modules)}</p>")
-        if snapshot.selinux.boolean_overrides:
-            html_parts.append(f"<p>Boolean overrides: {len(snapshot.selinux.boolean_overrides)}</p>")
-        if snapshot.selinux.audit_rules:
-            html_parts.append(f"<p>Audit rule files: {len(snapshot.selinux.audit_rules)}</p>")
-        if snapshot.selinux.pam_configs:
-            html_parts.append(f"<p>PAM configs: {len(snapshot.selinux.pam_configs)}</p>")
+
+        if se.custom_modules:
+            html_parts.append(f"<h3>Custom policy modules ({len(se.custom_modules)})</h3>")
+            html_parts.append("<ul>")
+            for m in se.custom_modules:
+                html_parts.append(f"<li><code>{m}</code></li>")
+            html_parts.append("</ul>")
+
+        non_default = [b for b in (se.boolean_overrides or []) if b.get("non_default")]
+        unchanged_count = len(se.boolean_overrides or []) - len(non_default)
+        if non_default:
+            html_parts.append(f"<h3>Non-default booleans ({len(non_default)})</h3>")
+            html_parts.append('<table class="data-table"><thead><tr>'
+                              '<th>Boolean</th><th>Current</th><th>Default</th><th>Description</th>'
+                              '</tr></thead><tbody>')
+            for b in non_default:
+                name = b.get("name", "?")
+                cur = b.get("current", "?")
+                dflt = b.get("default", "?")
+                desc = b.get("description", "")
+                cur_cls = "color:#3fb950" if cur == "on" else "color:#f85149"
+                html_parts.append(
+                    f'<tr><td><code>{name}</code></td>'
+                    f'<td style="{cur_cls};font-weight:bold">{cur}</td>'
+                    f'<td>{dflt}</td><td>{desc}</td></tr>'
+                )
+            html_parts.append("</tbody></table>")
+        if unchanged_count > 0:
+            html_parts.append(f"<p>{unchanged_count} boolean(s) at default values (not shown).</p>")
+
+        if se.audit_rules:
+            html_parts.append(f"<p>Audit rule files: {len(se.audit_rules)}</p>")
+        if se.pam_configs:
+            html_parts.append(f"<p>PAM configs: {len(se.pam_configs)}</p>")
     else:
         html_parts.append("<p>No SELinux/security customizations detected.</p>")
     html_parts.append("</div>")
