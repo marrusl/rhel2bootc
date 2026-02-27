@@ -5,12 +5,21 @@ and optionally runs podman inspect for live container details.
 """
 
 import json
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..executor import Executor
 from ..schema import ContainerSection
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] container: {msg}", file=sys.stderr)
 
 
 def _safe_glob(d: Path, pattern: str) -> List[Path]:
@@ -30,7 +39,8 @@ def _safe_rglob(d: Path, pattern: str) -> List[Path]:
 def _safe_read(p: Path) -> str:
     try:
         return p.read_text()
-    except (PermissionError, OSError):
+    except (PermissionError, OSError) as exc:
+        _debug(f"cannot read {p}: {exc}")
         return ""
 
 
@@ -38,8 +48,10 @@ def _extract_quadlet_image(content: str) -> str:
     """Extract the Image= value from a quadlet .container file."""
     for line in content.splitlines():
         stripped = line.strip()
-        if stripped.startswith("Image="):
-            return stripped.split("=", 1)[1].strip()
+        if stripped.lower().startswith("image") and "=" in stripped:
+            key, _, val = stripped.partition("=")
+            if key.strip().lower() == "image":
+                return val.strip()
     return ""
 
 
@@ -136,18 +148,32 @@ def run(
     host_root = Path(host_root)
 
     # --- Quadlet units ---
-    for subdir in ("etc/containers/systemd", "usr/share/containers/systemd"):
+    quadlet_dirs = [
+        "etc/containers/systemd",
+        "usr/share/containers/systemd",
+        "etc/systemd/system",
+    ]
+    for subdir in quadlet_dirs:
         d = host_root / subdir
-        if d.exists():
-            for f in _safe_glob(d, "*.container"):
-                content = _safe_read(f)
-                image_ref = _extract_quadlet_image(content)
-                section.quadlet_units.append({
-                    "path": str(f.relative_to(host_root)),
-                    "name": f.name,
-                    "content": content,
-                    "image": image_ref,
-                })
+        try:
+            exists = d.exists()
+        except (PermissionError, OSError):
+            exists = False
+        if not exists:
+            continue
+        for f in _safe_glob(d, "*.container"):
+            content = _safe_read(f)
+            _debug(f"quadlet: {f} ({len(content)} bytes)")
+            image_ref = _extract_quadlet_image(content)
+            _debug(f"quadlet: {f.name} Image={image_ref!r}")
+            if not image_ref and content:
+                _debug(f"quadlet: no Image= found, first 5 lines: {content.splitlines()[:5]}")
+            section.quadlet_units.append({
+                "path": str(f.relative_to(host_root)),
+                "name": f.name,
+                "content": content,
+                "image": image_ref,
+            })
 
     # --- Compose files ---
     for search_dir in ("opt", "srv", "home", "etc"):

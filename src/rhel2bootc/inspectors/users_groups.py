@@ -1,10 +1,19 @@
 """User/Group inspector: non-system users and groups, sudoers, SSH key refs. Parses passwd/group under host_root."""
 
+import os
+import sys
 from pathlib import Path
 from typing import List, Optional
 
 from ..executor import Executor
 from ..schema import UserGroupSection
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] users: {msg}", file=sys.stderr)
 
 
 def _safe_iterdir(d: Path) -> List[Path]:
@@ -21,14 +30,20 @@ def run(
     section = UserGroupSection()
     host_root = Path(host_root)
 
-    passwd = host_root / "etc/passwd"
+    passwd_path = host_root / "etc/passwd"
+    _debug(f"checking {passwd_path}")
+    passwd_text = None
     try:
-        if not passwd.exists():
-            passwd = None
-    except (PermissionError, OSError):
-        passwd = None
-    if passwd:
-        for line in passwd.read_text().splitlines():
+        if passwd_path.exists():
+            passwd_text = passwd_path.read_text()
+            _debug(f"read {passwd_path} ({len(passwd_text)} bytes, {len(passwd_text.splitlines())} lines)")
+        else:
+            _debug(f"{passwd_path} does not exist")
+    except (PermissionError, OSError) as exc:
+        _debug(f"cannot read {passwd_path}: {exc}")
+
+    if passwd_text:
+        for line in passwd_text.splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 parts = line.split(":")
@@ -36,6 +51,7 @@ def run(
                     try:
                         uid = int(parts[2])
                         if uid >= 1000:
+                            _debug(f"found user: {parts[0]} uid={uid} home={parts[5]} shell={parts[6]}")
                             section.users.append({
                                 "name": parts[0],
                                 "uid": uid,
@@ -46,9 +62,22 @@ def run(
                     except ValueError:
                         pass
 
-    group = host_root / "etc/group"
-    if group.exists():
-        for line in group.read_text().splitlines():
+    _debug(f"found {len(section.users)} non-system users (uid >= 1000)")
+
+    group_path = host_root / "etc/group"
+    _debug(f"checking {group_path}")
+    group_text = None
+    try:
+        if group_path.exists():
+            group_text = group_path.read_text()
+            _debug(f"read {group_path} ({len(group_text)} bytes)")
+        else:
+            _debug(f"{group_path} does not exist")
+    except (PermissionError, OSError) as exc:
+        _debug(f"cannot read {group_path}: {exc}")
+
+    if group_text:
+        for line in group_text.splitlines():
             line = line.strip()
             if line and not line.startswith("#"):
                 parts = line.split(":")
@@ -60,6 +89,8 @@ def run(
                             section.groups.append({"name": parts[0], "gid": gid, "members": members})
                     except ValueError:
                         pass
+
+    _debug(f"found {len(section.groups)} non-system groups (gid >= 1000)")
 
     for sudoers_path in ("etc/sudoers", "etc/sudoers.d"):
         sp = host_root / sudoers_path

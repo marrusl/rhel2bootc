@@ -2,7 +2,7 @@
 
 ## Runtime Model
 
-A privileged container (`--privileged` or at minimum `--pid=host --ipc=host -v /:/host:ro` plus a writable output mount) that inspects the host via `/host`. This is clean — no contamination of the source system, no installation required, and it naturally separates the tool from the thing being inspected.
+A container run with `--security-opt label=disable -v /:/host:ro` plus a writable output mount that inspects the host via `/host`. The container is a packaging convenience — the tool needs full read access to the host filesystem, so SELinux label enforcement is disabled. This is clean — no contamination of the source system, no installation required, and it naturally separates the tool from the thing being inspected.
 
 Output goes to a mounted volume that becomes either local files, a local git repo, or gets pushed to GitHub via the API.
 
@@ -199,7 +199,7 @@ Some packages reported as "added" may have been part of the original installatio
 Review the package list in the audit report and remove false positives.
 ```
 
-The `--profile NAME` flag overrides auto-detection entirely, which is useful when SELinux prevents the container from reading `/host/root/anaconda-ks.cfg` (a common situation with `:ro` bind mounts). Adding `--security-opt label=disable` to the `podman run` command is an alternative that restores full host filesystem access.
+The `--profile NAME` flag overrides auto-detection entirely, which is useful when the kickstart file has been removed or is otherwise unavailable.
 
 **No network / air-gapped fallback:**
 

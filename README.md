@@ -45,12 +45,14 @@ podman build -t rhel2bootc .
 Run it against a host. **Typically you run the container on the host you are inspecting**, so both the host root and the output directory are bind-mounted from that same host. The tool reads the host via `/host` and writes artifacts to `--output-dir`; with the mount below, those artifacts end up on the host at `./rhel2bootc-output`.
 
 ```bash
-# On the host being inspected: mount its root at /host and a directory on the host for output
-podman run --rm \
+sudo podman run --rm \
+  --security-opt label=disable \
   -v /:/host:ro \
-  -v ./rhel2bootc-output:/output \
+  -v ./rhel2bootc-output:/output:z \
   rhel2bootc --output-dir /output
 ```
+
+> **Note:** `--security-opt label=disable` turns off SELinux label enforcement for the container. The tool needs to read `/etc/passwd`, `/root/anaconda-ks.cfg`, systemd presets, and other files across the entire host filesystem. The container is a packaging convenience, not a security boundary — this is an admin inspection tool meant to run with full read access.
 
 After the run, `./rhel2bootc-output` on the host contains the Containerfile, config tree, reports, and snapshot. You can then copy that directory off the host or push it to GitHub with `--push-to-github`. The HTML report (`report.html`) is **self-contained and portable**: all content is embedded, so you can share or archive that file alone.
 
@@ -220,9 +222,6 @@ The tool dynamically generates a package baseline by fetching the distribution's
 - **No network / no comps available** — enters "all-packages mode" where every installed package is treated as operator-added (no baseline subtraction), with a clear warning in the reports
 - **Air-gapped environments** — use `--comps-file` to provide a local comps XML, bypassing all network access
 
-**Profile detection and SELinux:** The tool auto-detects the install profile from `/root/anaconda-ks.cfg`. When running in a container, SELinux may prevent access to `/host/root/` even with `:ro` bind mounts. If you see the "Could not determine original install profile" warning, you have two options:
-
-- Use `--profile server` (or `minimal`, `workstation`, etc.) to specify the profile directly
-- Add `--security-opt label=disable` to the `podman run` command to allow full host filesystem access
+**Profile detection:** The tool auto-detects the install profile from `/root/anaconda-ks.cfg`. If auto-detection fails (e.g., the file was removed), use `--profile server` (or `minimal`, `workstation`, etc.) to specify it directly.
 
 The resolved baseline is cached in the inspection snapshot, so `--from-snapshot` re-renders work without network access.

@@ -281,6 +281,74 @@ def _parse_pip_list(output: str) -> List[dict]:
 # Existing scanners (pip dist-info, npm, gem, directory scan)
 # ---------------------------------------------------------------------------
 
+_FHS_BIN_DIRS = frozenset({"bin", "sbin", "libexec"})
+_FHS_LIB_DIRS = frozenset({"lib", "lib64"})
+_FHS_ENUMERATE_DIRS = _FHS_BIN_DIRS | _FHS_LIB_DIRS
+
+
+def _classify_file(
+    host_root: Path,
+    f: Path,
+    executor: Optional[Executor],
+    deep: bool,
+) -> dict:
+    """Classify a single file and return an item dict."""
+    item: dict = {
+        "path": str(f.relative_to(host_root)),
+        "name": f.name,
+        "confidence": "low",
+        "method": "file scan",
+    }
+    if not executor:
+        return item
+
+    binary_info = _classify_binary(executor, f)
+    if binary_info:
+        item["lang"] = binary_info["lang"]
+        item["static"] = binary_info["static"]
+        item["shared_libs"] = binary_info["shared_libs"]
+        item["confidence"] = "high"
+        item["method"] = f"readelf ({binary_info['lang']})"
+        return item
+
+    if _is_binary(executor, host_root, f):
+        limit = None if deep else 4
+        ver = _strings_version(executor, f, limit_kb=limit)
+        if ver:
+            item["version"] = ver
+            item["method"] = "strings" if deep else "strings (first 4KB)"
+            item["confidence"] = "medium"
+
+    return item
+
+
+def _scan_fhs_dir_files(
+    section: NonRpmSoftwareSection,
+    host_root: Path,
+    fhs_dir: Path,
+    executor: Optional[Executor],
+    deep: bool,
+) -> None:
+    """Enumerate individual files inside an FHS directory (bin, lib, etc.)."""
+    try:
+        entries = sorted(fhs_dir.iterdir())
+    except (PermissionError, OSError):
+        return
+
+    for f in entries:
+        if f.name.startswith("."):
+            continue
+        if f.is_file() or f.is_symlink():
+            if f.is_symlink() and not f.exists():
+                continue
+            item = _classify_file(host_root, f, executor, deep)
+            section.items.append(item)
+        elif f.is_dir():
+            # Recurse one level for lib subdirs (e.g. lib/python3.x/)
+            if fhs_dir.name in _FHS_LIB_DIRS:
+                _scan_fhs_dir_files(section, host_root, f, executor, deep)
+
+
 def _scan_dirs(
     section: NonRpmSoftwareSection,
     host_root: Path,
@@ -296,6 +364,11 @@ def _scan_dirs(
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
             if base == "usr/local" and entry.name in _FHS_DIRS and not _dir_has_content(entry):
+                continue
+
+            # FHS bin/lib dirs under /usr/local: enumerate individual files
+            if base == "usr/local" and entry.name in _FHS_ENUMERATE_DIRS:
+                _scan_fhs_dir_files(section, host_root, entry, executor, deep)
                 continue
 
             # Check for git repo first
@@ -320,7 +393,6 @@ def _scan_dirs(
                     for f in entry.rglob("*"):
                         if not f.is_file():
                             continue
-                        # Try readelf classification first
                         binary_info = _classify_binary(executor, f)
                         if binary_info:
                             item["lang"] = binary_info["lang"]
@@ -329,7 +401,6 @@ def _scan_dirs(
                             item["confidence"] = "high"
                             item["method"] = f"readelf ({binary_info['lang']})"
                             break
-                        # Fall back to file+strings
                         if _is_binary(executor, host_root, f):
                             limit = None if deep else 4
                             ver = _strings_version(executor, f, limit_kb=limit)
