@@ -199,6 +199,8 @@ Some packages reported as "added" may have been part of the original installatio
 Review the package list in the audit report and remove false positives.
 ```
 
+The `--profile NAME` flag overrides auto-detection entirely, which is useful when SELinux prevents the container from reading `/host/root/anaconda-ks.cfg` (a common situation with `:ro` bind mounts). Adding `--security-opt label=disable` to the `podman run` command is an alternative that restores full host filesystem access.
+
 **No network / air-gapped fallback:**
 
 If the comps XML cannot be fetched (air-gapped environment, broken repos, unreachable mirror), the tool degrades gracefully:
@@ -461,6 +463,7 @@ The default run is optimized for speed — it covers the vast majority of system
 |---|---|---|
 | `--output-dir DIR` | `./rhel2bootc-output/` | Directory to write all output artifacts to. Created if it doesn't exist. |
 | `--comps-file FILE` | off | Path to a local comps XML file for air-gapped environments where the tool cannot fetch comps from repos at runtime. |
+| `--profile NAME` | auto-detect | Override the install profile used for baseline generation (e.g. `server`, `minimal`, `workstation`). Bypasses kickstart file auto-detection, which is useful when SELinux prevents access to `/host/root/`. |
 | `--validate` | off | After generating output, run `podman build` against the Containerfile to verify it builds successfully. Reports build errors with context so operators can fix issues before manual review. Requires `podman` on the host or in the tool container. |
 | `--config-diffs` | off | Extract RPM defaults via `rpm2cpio` and generate line-by-line diffs for modified config files. Requires RPMs to be in local cache or downloadable from repos. |
 | `--deep-binary-scan` | off | Run full `strings` scan on unknown binaries in `/opt` and `/usr/local` for version detection. Slow on large statically-linked binaries. |
