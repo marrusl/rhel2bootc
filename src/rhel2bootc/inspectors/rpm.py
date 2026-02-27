@@ -190,34 +190,47 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
 
 def _rpm_dep_query(
     executor: Executor, host_root: Path, tag: str,
+    installed_count: int,
 ) -> str:
     """Run a bulk rpm -qa --queryformat query for a dependency tag.
 
-    Tries --dbpath first, then --root with lock redirect.
-    Returns stdout or empty string on failure.
+    Tries chroot first (host's own RPM), then --dbpath, then --root.
+    A result is considered valid only if it has more lines than packages
+    (each package provides/requires multiple capabilities).
     """
-    dbpath = str(host_root / "var" / "lib" / "rpm")
     fmt = f"[%{{NAME}}\\t%{{{tag}}}\\n]"
+    min_lines = max(installed_count, 50)
 
-    cmd = ["rpm", "--dbpath", dbpath, "-qa", "--queryformat", fmt]
+    # 1. chroot into host — uses the host's RPM against its own DB
+    cmd = ["chroot", str(host_root), "rpm", "-qa", "--queryformat", fmt]
     result = executor(cmd)
-    if result.returncode == 0 and result.stdout.strip():
+    lines = len(result.stdout.splitlines()) if result.stdout else 0
+    _debug(f"dep-expand: chroot rpm {tag}: rc={result.returncode} lines={lines}")
+    if result.returncode == 0 and lines >= min_lines:
         return result.stdout
 
-    _debug(f"dep-expand: --dbpath query for {tag} "
-           f"rc={result.returncode} stdout={len(result.stdout)} bytes, "
-           f"trying --root fallback")
+    # 2. --dbpath with container's RPM
+    dbpath = str(host_root / "var" / "lib" / "rpm")
+    cmd = ["rpm", "--dbpath", dbpath, "-qa", "--queryformat", fmt]
+    result = executor(cmd)
+    lines = len(result.stdout.splitlines()) if result.stdout else 0
+    _debug(f"dep-expand: --dbpath rpm {tag}: rc={result.returncode} lines={lines}")
+    if result.returncode == 0 and lines >= min_lines:
+        return result.stdout
+
+    # 3. --root with lock redirect
     cmd = [
         "rpm", "--root", str(host_root),
     ] + _RPM_LOCK_DEFINE + [
         "-qa", "--queryformat", fmt,
     ]
     result = executor(cmd)
-    if result.returncode == 0 and result.stdout.strip():
+    lines = len(result.stdout.splitlines()) if result.stdout else 0
+    _debug(f"dep-expand: --root rpm {tag}: rc={result.returncode} lines={lines}")
+    if result.returncode == 0 and lines >= min_lines:
         return result.stdout
 
-    _debug(f"dep-expand: --root query for {tag} also failed "
-           f"rc={result.returncode} stderr={result.stderr.strip()[:200]}")
+    _debug(f"dep-expand: all query methods for {tag} returned insufficient data")
     return ""
 
 
@@ -234,7 +247,9 @@ def _expand_baseline_deps(
     graph from *seed_names* to collect every installed package that is
     a transitive dependency.
     """
-    prov_stdout = _rpm_dep_query(executor, host_root, "PROVIDENAME")
+    prov_stdout = _rpm_dep_query(
+        executor, host_root, "PROVIDENAME", len(installed_names),
+    )
     if not prov_stdout:
         _debug("dep-expand: no provides data, skipping expansion")
         return seed_names
@@ -254,7 +269,9 @@ def _expand_baseline_deps(
         _debug(f"dep-expand: no matched provides; first 5 raw lines: {raw_lines}")
         return seed_names
 
-    req_stdout = _rpm_dep_query(executor, host_root, "REQUIRENAME")
+    req_stdout = _rpm_dep_query(
+        executor, host_root, "REQUIRENAME", len(installed_names),
+    )
     if not req_stdout:
         _debug("dep-expand: no requires data, skipping expansion")
         return seed_names
