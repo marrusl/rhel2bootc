@@ -14,12 +14,12 @@ from typing import List, Optional, Set
 from ..executor import Executor
 from ..schema import ConfigFileEntry, ConfigFileKind, ConfigSection, RpmSection
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] config: {msg}", file=sys.stderr)
+        print(f"[yoinkc] config: {msg}", file=sys.stderr)
 
 # ---------------------------------------------------------------------------
 # System-generated files to exclude from the "unowned" list.
@@ -175,7 +175,7 @@ def _download_rpm_from_repo(executor: Executor, host_root: Path, package_name: s
     """
     if not executor:
         return None
-    tmp_dir = "/tmp/rhel2bootc-rpm-download"
+    tmp_dir = "/tmp/yoinkc-rpm-download"
     cmd = [
         "dnf", "download", "--destdir", tmp_dir,
         "--installroot", str(host_root),

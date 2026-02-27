@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from jinja2 import Environment
 
-from rhel2bootc.schema import (
+from yoinkc.schema import (
     ConfigFileEntry,
     ConfigFileKind,
     ConfigSection,
@@ -32,8 +32,8 @@ from rhel2bootc.schema import (
     StorageSection,
     UserGroupSection,
 )
-from rhel2bootc.renderers.containerfile import render as render_containerfile
-from rhel2bootc.renderers.html_report import render as render_html_report
+from yoinkc.renderers.containerfile import render as render_containerfile
+from yoinkc.renderers.html_report import render as render_html_report
 
 
 def _env():
@@ -47,7 +47,7 @@ def _env():
 class TestServiceBaselinePresets:
 
     def test_parse_preset_lines(self):
-        from rhel2bootc.inspectors.service import _parse_preset_lines
+        from yoinkc.inspectors.service import _parse_preset_lines
         lines = [
             "enable sshd.service",
             "enable chronyd.service",
@@ -60,7 +60,7 @@ class TestServiceBaselinePresets:
         assert has_disable_all is True
 
     def test_base_image_text_preferred_over_host(self):
-        from rhel2bootc.inspectors.service import _parse_preset_files
+        from yoinkc.inspectors.service import _parse_preset_files
         enabled, disabled, _ = _parse_preset_files(
             Path("/nonexistent"),
             base_image_preset_text="enable sshd.service\ndisable *\n",
@@ -69,8 +69,8 @@ class TestServiceBaselinePresets:
 
     def test_run_with_base_image_presets(self):
         """Service enabled on host but not in base presets → action=enable."""
-        from rhel2bootc.inspectors.service import run as run_service
-        from rhel2bootc.executor import RunResult
+        from yoinkc.inspectors.service import run as run_service
+        from yoinkc.executor import RunResult
 
         def exec_(cmd, cwd=None):
             if "systemctl" in cmd:
@@ -96,7 +96,7 @@ class TestServiceBaselinePresets:
 class TestCronCommandExtraction:
 
     def test_command_in_exec_start(self):
-        from rhel2bootc.inspectors.scheduled_tasks import _make_timer_service
+        from yoinkc.inspectors.scheduled_tasks import _make_timer_service
         _, service = _make_timer_service(
             "cron-backup", "0 2 * * *", "etc/cron.d/backup",
             command="/usr/local/bin/backup.sh --full",
@@ -105,13 +105,13 @@ class TestCronCommandExtraction:
         assert "FIXME" not in service
 
     def test_fallback_when_no_command(self):
-        from rhel2bootc.inspectors.scheduled_tasks import _make_timer_service
+        from yoinkc.inspectors.scheduled_tasks import _make_timer_service
         _, service = _make_timer_service("x", "0 0 * * *", "etc/cron.d/x")
         assert "ExecStart=/bin/true" in service
         assert "FIXME" in service
 
     def test_system_crontab_skips_user_field(self, tmp_path):
-        from rhel2bootc.inspectors.scheduled_tasks import _scan_cron_file
+        from yoinkc.inspectors.scheduled_tasks import _scan_cron_file
         cron_d = tmp_path / "etc/cron.d"
         cron_d.mkdir(parents=True)
         (cron_d / "logrotate").write_text(
@@ -125,7 +125,7 @@ class TestCronCommandExtraction:
         spool = tmp_path / "var/spool/cron"
         spool.mkdir(parents=True)
         (spool / "mark").write_text("30 1 * * * /home/mark/cleanup.sh\n")
-        from rhel2bootc.inspectors.scheduled_tasks import _scan_cron_file
+        from yoinkc.inspectors.scheduled_tasks import _scan_cron_file
         section = ScheduledTaskSection()
         _scan_cron_file(section, tmp_path, spool / "mark", "spool/cron (mark)")
         assert section.generated_timer_units[0]["command"] == "/home/mark/cleanup.sh"
@@ -175,12 +175,12 @@ class TestMultiStageContainerfile:
 class TestConfigDiffFallback:
 
     def test_download_rpm_from_repo_success(self):
-        from rhel2bootc.inspectors.config import _download_rpm_from_repo
-        from rhel2bootc.executor import RunResult
+        from yoinkc.inspectors.config import _download_rpm_from_repo
+        from yoinkc.executor import RunResult
 
         def exec_(cmd, cwd=None):
             if "dnf" in " ".join(cmd) and "download" in " ".join(cmd):
-                dest = Path("/tmp/rhel2bootc-rpm-download")
+                dest = Path("/tmp/yoinkc-rpm-download")
                 dest.mkdir(parents=True, exist_ok=True)
                 (dest / "httpd-2.4.51-7.el9.x86_64.rpm").write_text("fake")
                 return RunResult(stdout="", stderr="", returncode=0)
@@ -188,11 +188,11 @@ class TestConfigDiffFallback:
 
         result = _download_rpm_from_repo(exec_, Path("/host"), "httpd")
         assert result is not None and result.name.startswith("httpd-")
-        import shutil; shutil.rmtree("/tmp/rhel2bootc-rpm-download", ignore_errors=True)
+        import shutil; shutil.rmtree("/tmp/yoinkc-rpm-download", ignore_errors=True)
 
     def test_extract_uses_dot_slash_prefix(self):
-        from rhel2bootc.inspectors.config import _extract_file_from_rpm
-        from rhel2bootc.executor import RunResult
+        from yoinkc.inspectors.config import _extract_file_from_rpm
+        from yoinkc.executor import RunResult
 
         captured = []
         def exec_(cmd, cwd=None):
@@ -228,7 +228,7 @@ def test_html_diff_spans():
 # ---------------------------------------------------------------------------
 
 def test_storage_recommendation_mapping():
-    from rhel2bootc.renderers.audit_report import _storage_recommendation as rec
+    from yoinkc.renderers.audit_report import _storage_recommendation as rec
     assert "image-embedded" in rec("/", "xfs", "/dev/sda1")
     assert "network mount" in rec("/data", "nfs", "server:/share")
     assert "swap" in rec("none", "swap", "/dev/sda3")
@@ -275,7 +275,7 @@ def test_append_files_written():
 class TestDeepVersionPatterns:
 
     def _match(self, data: bytes, expected: bytes):
-        from rhel2bootc.inspectors.non_rpm_software import DEEP_VERSION_PATTERNS
+        from yoinkc.inspectors.non_rpm_software import DEEP_VERSION_PATTERNS
         for pat in DEEP_VERSION_PATTERNS:
             m = pat.search(data)
             if m and m.group(1) == expected:
@@ -292,7 +292,7 @@ class TestDeepVersionPatterns:
         self._match(b"OpenSSL 3.0.12 24 Oct 2023", b"3.0.12")
 
     def test_deep_is_superset_of_base(self):
-        from rhel2bootc.inspectors.non_rpm_software import VERSION_PATTERNS, DEEP_VERSION_PATTERNS
+        from yoinkc.inspectors.non_rpm_software import VERSION_PATTERNS, DEEP_VERSION_PATTERNS
         for pat in VERSION_PATTERNS:
             assert pat in DEEP_VERSION_PATTERNS
 
@@ -302,13 +302,13 @@ class TestDeepVersionPatterns:
 # ---------------------------------------------------------------------------
 
 def test_profile_flag_rejected():
-    from rhel2bootc.cli import parse_args
+    from yoinkc.cli import parse_args
     with pytest.raises(SystemExit):
         parse_args(["--profile", "server"])
 
 
 def test_comps_file_flag_rejected():
-    from rhel2bootc.cli import parse_args
+    from yoinkc.cli import parse_args
     with pytest.raises(SystemExit):
         parse_args(["--comps-file", "/tmp/comps.xml"])
 
@@ -392,7 +392,7 @@ def test_all_features_render_together():
         ),
     )
     with tempfile.TemporaryDirectory() as tmp:
-        from rhel2bootc.renderers import run_all
+        from yoinkc.renderers import run_all
         run_all(snapshot, Path(tmp))
         content = (Path(tmp) / "Containerfile").read_text()
 

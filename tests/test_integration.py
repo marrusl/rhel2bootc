@@ -8,11 +8,11 @@ Test 2: Load snapshot via --from-snapshot path and run only renderers; verify id
 import tempfile
 from pathlib import Path
 
-from rhel2bootc.executor import Executor, RunResult
-from rhel2bootc.inspectors import run_all as run_all_inspectors
-from rhel2bootc.pipeline import load_snapshot, save_snapshot
-from rhel2bootc.redact import redact_snapshot
-from rhel2bootc.renderers import run_all as run_all_renderers
+from yoinkc.executor import Executor, RunResult
+from yoinkc.inspectors import run_all as run_all_inspectors
+from yoinkc.pipeline import load_snapshot, save_snapshot
+from yoinkc.redact import redact_snapshot
+from yoinkc.renderers import run_all as run_all_renderers
 
 FIXTURES = Path(__file__).parent / "fixtures"
 

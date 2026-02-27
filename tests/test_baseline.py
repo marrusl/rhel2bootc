@@ -4,12 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from rhel2bootc.baseline import (
+from yoinkc.baseline import (
     select_base_image,
     load_baseline_packages_file,
     get_baseline_packages,
 )
-from rhel2bootc.executor import RunResult
+from yoinkc.executor import RunResult
 
 
 FIXTURES = Path(__file__).parent / "fixtures"

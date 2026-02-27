@@ -278,7 +278,7 @@ def render(
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>rhel2bootc Report</title>
+<title>yoinkc Report</title>
 <style>
 :root { --bg: #0f1419; --card: #1a2332; --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff; --warn: #d29922; --error: #f85149; --ok: #3fb950; }
 * { box-sizing: border-box; }
@@ -353,7 +353,7 @@ th { color: var(--muted); font-weight: 500; }
 </style>
 </head>
 <body>
-<h1>rhel2bootc Inspection Report</h1>
+<h1>yoinkc Inspection Report</h1>
 <div class="banner">
   <strong>Host:</strong> """ + os_desc + """ &nbsp;|&nbsp;
   <span style="color:#3fb950">&#10003; """ + str(triage["automatic"]) + """ automatic</span> &nbsp;|&nbsp;

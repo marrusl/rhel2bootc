@@ -9,7 +9,7 @@ from typing import Optional
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="rhel2bootc",
+        prog="yoinkc",
         description="Inspect RHEL/CentOS hosts and produce bootc image artifacts.",
     )
     parser.add_argument(
@@ -23,8 +23,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--output-dir",
         dest="output_dir",
         type=Path,
-        default=Path("./rhel2bootc-output"),
-        help="Output directory for all artifacts (default: ./rhel2bootc-output)",
+        default=Path("./yoinkc-output"),
+        help="Output directory for all artifacts (default: ./yoinkc-output)",
     )
 
     # Snapshot load/save

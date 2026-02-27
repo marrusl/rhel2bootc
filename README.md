@@ -1,4 +1,4 @@
-# rhel2bootc
+# yoinkc
 
 Inspect RHEL/CentOS hosts and produce bootc image artifacts (Containerfile, config tree, audit report, etc.).
 
@@ -9,28 +9,28 @@ Inspect RHEL/CentOS hosts and produce bootc image artifacts (Containerfile, conf
 
 ## Usage
 
-All renderers write to the **output directory**, which is created if it does not exist. Default: `./rhel2bootc-output`.
+All renderers write to the **output directory**, which is created if it does not exist. Default: `./yoinkc-output`.
 
 ```bash
-# Inspect host mounted at /host, write to default ./rhel2bootc-output
-rhel2bootc
+# Inspect host mounted at /host, write to default ./yoinkc-output
+yoinkc
 
 # Specify output directory
-rhel2bootc --output-dir ./my-output
-# or: rhel2bootc -o ./my-output
+yoinkc --output-dir ./my-output
+# or: yoinkc -o ./my-output
 
 # Save snapshot only (no render)
-rhel2bootc --inspect-only -o ./out
+yoinkc --inspect-only -o ./out
 
 # Render from existing snapshot
-rhel2bootc --from-snapshot ./out/inspection-snapshot.json -o ./rendered
+yoinkc --from-snapshot ./out/inspection-snapshot.json -o ./rendered
 ```
 
 ## Development
 
 ```bash
 pip install -e .
-rhel2bootc --help
+yoinkc --help
 pytest
 ```
 
@@ -39,23 +39,23 @@ pytest
 Build the tool image:
 
 ```bash
-podman build -t rhel2bootc .
+podman build -t yoinkc .
 ```
 
-Run it against a host. **Typically you run the container on the host you are inspecting**, so both the host root and the output directory are bind-mounted from that same host. The tool reads the host via `/host` and writes artifacts to `--output-dir`; with the mount below, those artifacts end up on the host at `./rhel2bootc-output`.
+Run it against a host. **Typically you run the container on the host you are inspecting**, so both the host root and the output directory are bind-mounted from that same host. The tool reads the host via `/host` and writes artifacts to `--output-dir`; with the mount below, those artifacts end up on the host at `./yoinkc-output`.
 
 ```bash
 sudo podman run --rm \
   --pid=host \
   --security-opt label=disable \
   -v /:/host:ro \
-  -v ./rhel2bootc-output:/output:z \
-  rhel2bootc --output-dir /output
+  -v ./yoinkc-output:/output:z \
+  yoinkc --output-dir /output
 ```
 
 > **Note:** `--pid=host` allows the tool to reach the host's `podman` (via `nsenter`) for querying the bootc base image package list. Without it, baseline generation falls back to all-packages mode. `--security-opt label=disable` turns off SELinux label enforcement. The tool needs broad read access across the host filesystem — the container is a packaging convenience, not a security boundary.
 
-After the run, `./rhel2bootc-output` on the host contains the Containerfile, config tree, reports, and snapshot. You can then copy that directory off the host or push it to GitHub with `--push-to-github`. The HTML report (`report.html`) is **self-contained and portable**: all content is embedded, so you can share or archive that file alone.
+After the run, `./yoinkc-output` on the host contains the Containerfile, config tree, reports, and snapshot. You can then copy that directory off the host or push it to GitHub with `--push-to-github`. The HTML report (`report.html`) is **self-contained and portable**: all content is embedded, so you can share or archive that file alone.
 
 ---
 
@@ -174,7 +174,7 @@ Each inspector examines one aspect of the host and contributes a section to the 
 | Flag | Description |
 |------|-------------|
 | `--host-root PATH` | Root path for host inspection (default: `/host`) |
-| `-o, --output-dir DIR` | Output directory for all artifacts (default: `./rhel2bootc-output`) |
+| `-o, --output-dir DIR` | Output directory for all artifacts (default: `./yoinkc-output`) |
 | `--from-snapshot PATH` | Skip inspection; load snapshot from file and run renderers only |
 | `--inspect-only` | Run inspectors and save snapshot; do not run renderers |
 

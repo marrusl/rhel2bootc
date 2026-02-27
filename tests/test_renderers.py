@@ -9,15 +9,15 @@ from pathlib import Path
 import pytest
 from jinja2 import Environment
 
-from rhel2bootc.pipeline import load_snapshot
-from rhel2bootc.renderers import run_all
-from rhel2bootc.renderers.audit_report import render as render_audit_report
-from rhel2bootc.renderers.containerfile import render as render_containerfile
-from rhel2bootc.renderers.html_report import render as render_html_report
-from rhel2bootc.renderers.kickstart import render as render_kickstart
-from rhel2bootc.renderers.readme import render as render_readme
-from rhel2bootc.renderers.secrets_review import render as render_secrets_review
-from rhel2bootc.schema import (
+from yoinkc.pipeline import load_snapshot
+from yoinkc.renderers import run_all
+from yoinkc.renderers.audit_report import render as render_audit_report
+from yoinkc.renderers.containerfile import render as render_containerfile
+from yoinkc.renderers.html_report import render as render_html_report
+from yoinkc.renderers.kickstart import render as render_kickstart
+from yoinkc.renderers.readme import render as render_readme
+from yoinkc.renderers.secrets_review import render as render_secrets_review
+from yoinkc.schema import (
     InspectionSnapshot,
     OsRelease,
     PackageEntry,
@@ -37,10 +37,10 @@ def _make_render_env():
 @pytest.fixture
 def snapshot_from_fixture():
     """Load snapshot from fixture JSON if present, else build minimal snapshot."""
-    snapshot_path = FIXTURES.parent / "rhel2bootc-snapshot.json"
+    snapshot_path = FIXTURES.parent / "yoinkc-snapshot.json"
     if not snapshot_path.exists():
         # Build minimal snapshot so renderers don't crash
-        from rhel2bootc.schema import (
+        from yoinkc.schema import (
             ConfigSection,
             OsRelease,
             RpmSection,
@@ -48,10 +48,10 @@ def snapshot_from_fixture():
             ConfigFileEntry,
             ConfigFileKind,
         )
-        from rhel2bootc.inspectors.rpm import run as run_rpm
-        from rhel2bootc.inspectors.service import run as run_service
-        from rhel2bootc.inspectors.config import run as run_config
-        from rhel2bootc.executor import RunResult
+        from yoinkc.inspectors.rpm import run as run_rpm
+        from yoinkc.inspectors.service import run as run_service
+        from yoinkc.inspectors.config import run as run_config
+        from yoinkc.executor import RunResult
 
         fixtures = FIXTURES
         def exec_(cmd, cwd=None):
@@ -71,7 +71,7 @@ def snapshot_from_fixture():
             return RunResult(stdout="", stderr="", returncode=1)
 
         host_root = fixtures / "host_etc"
-        from rhel2bootc.inspectors import run_all as run_inspectors
+        from yoinkc.inspectors import run_all as run_inspectors
         return run_inspectors(host_root, executor=exec_)
     return load_snapshot(snapshot_path)
 
@@ -333,7 +333,7 @@ def test_html_report_renderer(snapshot_from_fixture):
         path = output_dir / "report.html"
         assert path.exists()
         content = path.read_text()
-        assert "rhel2bootc" in content
+        assert "yoinkc" in content
         assert "<!DOCTYPE html>" in content
 
 
@@ -482,10 +482,10 @@ def test_html_report_cards_and_tabs_link_to_sections():
     warning panel is present and populated when snapshot has warnings.
     """
     import re
-    from rhel2bootc.executor import RunResult
-    from rhel2bootc.inspectors import run_all as run_inspectors
-    from rhel2bootc.redact import redact_snapshot
-    from rhel2bootc.renderers import run_all as run_renderers
+    from yoinkc.executor import RunResult
+    from yoinkc.inspectors import run_all as run_inspectors
+    from yoinkc.redact import redact_snapshot
+    from yoinkc.renderers import run_all as run_renderers
 
     F = Path(__file__).parent / "fixtures"
     def exec_(cmd, cwd=None):

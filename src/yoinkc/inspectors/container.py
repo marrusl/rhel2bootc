@@ -15,12 +15,12 @@ from ..executor import Executor
 from ..schema import ContainerSection
 from . import filtered_rglob
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] container: {msg}", file=sys.stderr)
+        print(f"[yoinkc] container: {msg}", file=sys.stderr)
 
 
 def _safe_glob(d: Path, pattern: str) -> List[Path]:

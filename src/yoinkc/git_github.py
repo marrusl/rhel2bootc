@@ -23,7 +23,7 @@ def init_git_repo(output_dir: Path) -> bool:
         return False
 
 
-def add_and_commit(output_dir: Path, message: str = "rhel2bootc output") -> bool:
+def add_and_commit(output_dir: Path, message: str = "yoinkc output") -> bool:
     """Add all files and commit. Return True on success."""
     try:
         import git
@@ -91,7 +91,7 @@ def push_to_github(
                 from github import Github
                 g = Github()
                 user = g.get_user()
-                name = repo_spec.split("/")[-1] if "/" in repo_spec else "rhel2bootc-output"
+                name = repo_spec.split("/")[-1] if "/" in repo_spec else "yoinkc-output"
                 gh_repo = user.create_repo(name, private=create_private, auto_init=False)
                 origin_url = gh_repo.clone_url
             except ImportError:

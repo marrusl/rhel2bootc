@@ -26,7 +26,7 @@ def render(
     output_dir: Path,
 ) -> None:
     output_dir = Path(output_dir)
-    lines = ["# rhel2bootc output", ""]
+    lines = ["# yoinkc output", ""]
 
     # --- Summary of findings ---
     os_name = ""

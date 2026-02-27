@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from rhel2bootc.executor import Executor, RunResult
-from rhel2bootc.inspectors import run_all
-from rhel2bootc.inspectors.rpm import _parse_nevr, _parse_rpm_qa, _parse_rpm_va
-from rhel2bootc.schema import InspectionSnapshot, RpmSection
+from yoinkc.executor import Executor, RunResult
+from yoinkc.inspectors import run_all
+from yoinkc.inspectors.rpm import _parse_nevr, _parse_rpm_qa, _parse_rpm_va
+from yoinkc.schema import InspectionSnapshot, RpmSection
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -123,7 +123,7 @@ def test_parse_rpm_va():
 
 def test_rpm_inspector_with_fixtures(host_root, fixture_executor):
     """With executor that can query base image, baseline is applied via podman."""
-    from rhel2bootc.inspectors.rpm import run as run_rpm
+    from yoinkc.inspectors.rpm import run as run_rpm
     section = run_rpm(host_root, fixture_executor)
     assert section is not None
     assert section.no_baseline is False
@@ -139,7 +139,7 @@ def test_rpm_inspector_with_fixtures(host_root, fixture_executor):
 
 def test_rpm_inspector_with_baseline_file(host_root, fixture_executor):
     """With --baseline-packages, baseline is loaded from file."""
-    from rhel2bootc.inspectors.rpm import run as run_rpm
+    from yoinkc.inspectors.rpm import run as run_rpm
     baseline_file = FIXTURES / "base_image_packages.txt"
     section = run_rpm(host_root, fixture_executor, baseline_packages_file=baseline_file)
     assert section is not None
@@ -154,7 +154,7 @@ def test_rpm_inspector_with_baseline_file(host_root, fixture_executor):
 
 
 def test_service_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.service import run as run_service
+    from yoinkc.inspectors.service import run as run_service
     section = run_service(host_root, fixture_executor)
     assert section is not None
     assert any(s.unit == "httpd.service" and s.action == "enable" for s in section.state_changes)
@@ -162,8 +162,8 @@ def test_service_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_config_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.config import run as run_config
-    from rhel2bootc.inspectors.rpm import run as run_rpm
+    from yoinkc.inspectors.config import run as run_config
+    from yoinkc.inspectors.rpm import run as run_rpm
     rpm_section = run_rpm(host_root, fixture_executor)
     rpm_owned = set((FIXTURES / "rpm_qla_output.txt").read_text().strip().splitlines())
     section = run_config(host_root, fixture_executor, rpm_section=rpm_section, rpm_owned_paths_override=rpm_owned)
@@ -174,7 +174,7 @@ def test_config_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_network_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.network import run as run_network
+    from yoinkc.inspectors.network import run as run_network
     section = run_network(host_root, fixture_executor)
     assert section is not None
 
@@ -222,7 +222,7 @@ def test_network_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_storage_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.storage import run as run_storage
+    from yoinkc.inspectors.storage import run as run_storage
     section = run_storage(host_root, fixture_executor)
     assert section is not None
     assert len(section.fstab_entries) >= 1
@@ -230,7 +230,7 @@ def test_storage_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_scheduled_tasks_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.scheduled_tasks import run as run_scheduled_tasks
+    from yoinkc.inspectors.scheduled_tasks import run as run_scheduled_tasks
     section = run_scheduled_tasks(host_root, fixture_executor)
     assert section is not None
 
@@ -261,7 +261,7 @@ def test_scheduled_tasks_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_container_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.container import run as run_container
+    from yoinkc.inspectors.container import run as run_container
 
     # Without podman query
     section = run_container(host_root, fixture_executor, query_podman=False)
@@ -313,7 +313,7 @@ def test_container_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_non_rpm_software_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.non_rpm_software import run as run_non_rpm_software
+    from yoinkc.inspectors.non_rpm_software import run as run_non_rpm_software
     section = run_non_rpm_software(host_root, fixture_executor, deep_binary_scan=False)
     assert section is not None
 
@@ -380,7 +380,7 @@ def test_non_rpm_software_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_kernel_boot_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.kernel_boot import run as run_kernel_boot
+    from yoinkc.inspectors.kernel_boot import run as run_kernel_boot
     section = run_kernel_boot(host_root, fixture_executor)
     assert section is not None
     assert section.cmdline != ""
@@ -434,7 +434,7 @@ def test_kernel_boot_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_selinux_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.selinux import run as run_selinux
+    from yoinkc.inspectors.selinux import run as run_selinux
     section = run_selinux(host_root, fixture_executor)
     assert section is not None
     assert section.mode == "enforcing"
@@ -465,7 +465,7 @@ def test_selinux_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):
-    from rhel2bootc.inspectors.users_groups import run as run_users_groups
+    from yoinkc.inspectors.users_groups import run as run_users_groups
     section = run_users_groups(host_root, fixture_executor)
     assert section is not None
     assert any(u.get("name") == "jdoe" and u.get("uid") == 1000 for u in section.users)
@@ -547,8 +547,8 @@ def test_run_all_no_baseline_warning(host_root):
 def test_snapshot_roundtrip_with_baseline(host_root, fixture_executor):
     """Resolved baseline is in inspection-snapshot.json; --from-snapshot re-renders without network."""
     import tempfile
-    from rhel2bootc.pipeline import load_snapshot, save_snapshot
-    from rhel2bootc.renderers import run_all as run_all_renderers
+    from yoinkc.pipeline import load_snapshot, save_snapshot
+    from yoinkc.renderers import run_all as run_all_renderers
     snapshot = run_all(
         host_root,
         executor=fixture_executor,

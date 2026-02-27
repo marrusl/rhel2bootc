@@ -122,13 +122,13 @@ def _validate_supported_host(os_release: Optional[OsRelease]) -> Optional[str]:
     if os_release.id == "rhel":
         if not vid.startswith("9."):
             return (
-                f"Host is running RHEL {vid}. This version of rhel2bootc only supports "
+                f"Host is running RHEL {vid}. This version of yoinkc only supports "
                 "RHEL 9.x and CentOS Stream 9."
             )
     elif "centos" in os_release.id.lower():
         if vid != "9":
             return (
-                f"Host is running CentOS {vid}. This version of rhel2bootc only supports "
+                f"Host is running CentOS {vid}. This version of yoinkc only supports "
                 "CentOS Stream 9."
             )
     else:

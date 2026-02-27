@@ -4,13 +4,13 @@ Tests verifying every CLI flag is parsed and wired through to behavior.
 
 from pathlib import Path
 
-from rhel2bootc.cli import parse_args
+from yoinkc.cli import parse_args
 
 
 def test_defaults():
     args = parse_args([])
     assert args.host_root == Path("/host")
-    assert args.output_dir == Path("./rhel2bootc-output")
+    assert args.output_dir == Path("./yoinkc-output")
     assert args.from_snapshot is None
     assert args.inspect_only is False
     assert args.baseline_packages is None
@@ -58,9 +58,9 @@ def test_baseline_packages_reaches_inspectors():
     args = parse_args(["--baseline-packages", "/tmp/pkgs.txt"])
     assert args.baseline_packages == Path("/tmp/pkgs.txt")
 
-    with unittest.mock.patch("rhel2bootc.inspectors.run_all") as mock_run_all:
+    with unittest.mock.patch("yoinkc.inspectors.run_all") as mock_run_all:
         mock_run_all.return_value = unittest.mock.MagicMock()
-        from rhel2bootc.__main__ import _run_inspectors
+        from yoinkc.__main__ import _run_inspectors
         _run_inspectors(Path("/host"), args)
         mock_run_all.assert_called_once()
         call_kwargs = mock_run_all.call_args

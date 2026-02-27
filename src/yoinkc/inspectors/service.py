@@ -12,12 +12,12 @@ from typing import Dict, List, Optional, Set, Tuple
 from ..executor import Executor
 from ..schema import ServiceSection, ServiceStateChange
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] service: {msg}", file=sys.stderr)
+        print(f"[yoinkc] service: {msg}", file=sys.stderr)
 
 
 def _parse_preset_lines(lines: List[str]) -> Tuple[Set[str], Set[str], bool]:

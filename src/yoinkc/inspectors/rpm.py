@@ -9,12 +9,12 @@ import sys
 from pathlib import Path
 from typing import List, Optional, Set
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] rpm: {msg}", file=sys.stderr)
+        print(f"[yoinkc] rpm: {msg}", file=sys.stderr)
 
 
 from ..baseline import get_baseline_packages

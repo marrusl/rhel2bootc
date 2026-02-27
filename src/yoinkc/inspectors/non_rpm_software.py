@@ -23,12 +23,12 @@ from ..executor import Executor
 from ..schema import NonRpmSoftwareSection
 from . import is_dev_artifact, filtered_rglob
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] non-rpm: {msg}", file=sys.stderr)
+        print(f"[yoinkc] non-rpm: {msg}", file=sys.stderr)
 
 
 # Quick patterns for the default (4KB head) scan

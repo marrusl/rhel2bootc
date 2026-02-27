@@ -17,12 +17,12 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] baseline: {msg}", file=sys.stderr)
+        print(f"[yoinkc] baseline: {msg}", file=sys.stderr)
 
 
 def _run_on_host(executor, cmd: List[str]):

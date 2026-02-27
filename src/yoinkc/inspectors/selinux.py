@@ -9,12 +9,12 @@ from typing import List, Optional
 from ..executor import Executor
 from ..schema import SelinuxSection
 
-_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+_DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
 
 def _debug(msg: str) -> None:
     if _DEBUG:
-        print(f"[rhel2bootc] selinux: {msg}", file=sys.stderr)
+        print(f"[yoinkc] selinux: {msg}", file=sys.stderr)
 
 
 def _safe_iterdir(d: Path) -> List[Path]:
