@@ -3,9 +3,18 @@ RPM inspector: package list, rpm -Va, repo files, dnf history removed.
 Baseline is generated from comps XML (fetched or --comps-file); fallback is all-packages mode.
 """
 
+import os
 import re
+import sys
 from pathlib import Path
 from typing import List, Optional, Set
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] rpm: {msg}", file=sys.stderr)
 
 from ..baseline import get_baseline_packages
 from ..executor import Executor
@@ -28,13 +37,20 @@ _RPM_LOCK_DEFINE = ["--define", "_rpmlock_path /var/tmp/.rpm.lock"]
 
 
 def _parse_nevr(nevra: str) -> Optional[PackageEntry]:
-    """Parse a single NEVRA line from rpm -qa --queryformat."""
-    # Format: epoch:name-version-release.arch (name can contain hyphens, e.g. audit-libs)
+    """Parse a single NEVRA line from rpm -qa --queryformat.
+
+    Format: epoch:name-version-release.arch
+    Epoch is numeric or ``(none)`` when the package has no explicit epoch tag.
+    """
     s = nevra.strip()
     if ":" not in s:
         return None
     epoch_part, rest = s.split(":", 1)
-    if not epoch_part.isdigit():
+    if epoch_part.isdigit():
+        epoch = epoch_part
+    elif epoch_part == "(none)":
+        epoch = "0"
+    else:
         return None
     # rest = name-version-release.arch
     if "." not in rest:
@@ -43,13 +59,12 @@ def _parse_nevr(nevra: str) -> Optional[PackageEntry]:
     parts = base.split("-")
     if len(parts) < 3:
         return None
-    # release is last (e.g. 104.el9), version is second-to-last (e.g. 3.0.7), name is the rest
     release = parts[-1]
     version = parts[-2]
     name = "-".join(parts[:-2])
     return PackageEntry(
         name=name,
-        epoch=epoch_part,
+        epoch=epoch,
         version=version,
         release=release,
         arch=arch,
@@ -59,6 +74,7 @@ def _parse_nevr(nevra: str) -> Optional[PackageEntry]:
 
 def _parse_rpm_qa(stdout: str) -> List[PackageEntry]:
     packages = []
+    failed = []
     for line in stdout.strip().splitlines():
         line = line.strip()
         if not line:
@@ -66,6 +82,14 @@ def _parse_rpm_qa(stdout: str) -> List[PackageEntry]:
         pkg = _parse_nevr(line)
         if pkg:
             packages.append(pkg)
+        else:
+            failed.append(line)
+    if failed:
+        _debug(f"NEVRA parse failures: {len(failed)} lines")
+        for f in failed[:10]:
+            _debug(f"  failed to parse: {f!r}")
+    _debug(f"parsed {len(packages)} packages from rpm -qa "
+           f"(first 5 names: {[p.name for p in packages[:5]]})")
     return packages
 
 
@@ -207,9 +231,24 @@ def run(
 
     if installed:
         installed_names = {p.name for p in installed}
+        _debug(f"installed package count: {len(installed_names)}")
         if baseline_names is not None and not section.no_baseline:
             added_names = installed_names - baseline_names
             removed_names = baseline_names - installed_names
+            matched_names = installed_names & baseline_names
+            _debug(f"baseline has {len(baseline_names)} names, "
+                   f"installed has {len(installed_names)} names")
+            _debug(f"matched={len(matched_names)}, "
+                   f"added (installed-baseline)={len(added_names)}, "
+                   f"removed (baseline-installed)={len(removed_names)}")
+            if removed_names:
+                sample = sorted(removed_names)[:20]
+                _debug(f"'removed' sample (baseline names not in installed): {sample}")
+                for rname in sample:
+                    close = [n for n in installed_names
+                             if n.startswith(rname) or rname.startswith(n)]
+                    if close:
+                        _debug(f"  '{rname}' has close installed matches: {close[:5]}")
             section.baseline_package_names = sorted(baseline_names)
             for p in installed:
                 if p.name in added_names:

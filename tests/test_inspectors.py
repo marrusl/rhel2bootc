@@ -87,6 +87,15 @@ def test_parse_nevr():
     assert p.release == "2.el9"
     assert p.arch == "x86_64"
 
+    # (none) epoch — most packages on RHEL/CentOS have no explicit epoch
+    p2 = _parse_nevr("(none):coreutils-8.32-35.el9.aarch64")
+    assert p2 is not None
+    assert p2.name == "coreutils"
+    assert p2.epoch == "0"
+    assert p2.version == "8.32"
+    assert p2.release == "35.el9"
+    assert p2.arch == "aarch64"
+
 
 def test_parse_rpm_qa():
     text = (FIXTURES / "rpm_qa_output.txt").read_text()
@@ -95,6 +104,10 @@ def test_parse_rpm_qa():
     names = [p.name for p in packages]
     assert "bash" in names
     assert "httpd" in names
+    # (none) epoch packages must be parsed
+    assert "dnf" in names
+    assert "rpm" in names
+    assert "sudo" in names
 
 
 def test_parse_rpm_va():
@@ -253,14 +266,19 @@ def test_container_inspector_with_fixtures(host_root, fixture_executor):
     section = run_container(host_root, fixture_executor, query_podman=False)
     assert section is not None
 
-    # Quadlet units with image references
-    assert len(section.quadlet_units) >= 2
+    # Quadlet units with image references (system + user-level)
+    assert len(section.quadlet_units) >= 3
     unit_map = {u["name"]: u for u in section.quadlet_units}
     assert "nginx.container" in unit_map
     assert unit_map["nginx.container"]["image"] == "docker.io/library/nginx:1.25-alpine"
     assert "redis.container" in unit_map
     assert unit_map["redis.container"]["image"] == "registry.redhat.io/rhel9/redis-6:latest"
     assert unit_map["nginx.container"]["content"].strip().startswith("[Unit]")
+
+    # User-level quadlet from ~/.config/containers/systemd/
+    assert "dev-postgres.container" in unit_map
+    assert unit_map["dev-postgres.container"]["image"] == "docker.io/library/postgres:16"
+    assert "home/jdoe" in unit_map["dev-postgres.container"]["path"]
 
     # Compose files with parsed image references
     assert len(section.compose_files) >= 1
@@ -451,6 +469,24 @@ def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):
     assert section is not None
     assert any(u.get("name") == "jdoe" and u.get("uid") == 1000 for u in section.users)
     assert any(g.get("name") == "jdoe" and g.get("gid") == 1000 for g in section.groups)
+
+    # Raw entry capture
+    assert len(section.passwd_entries) >= 1
+    assert any("jdoe" in e for e in section.passwd_entries)
+    assert len(section.shadow_entries) >= 1
+    assert any("jdoe" in e for e in section.shadow_entries)
+    assert len(section.group_entries) >= 1
+    assert any("jdoe" in e for e in section.group_entries)
+    assert len(section.gshadow_entries) >= 1
+    assert any("jdoe" in e for e in section.gshadow_entries)
+    assert len(section.subuid_entries) >= 1
+    assert any("jdoe" in e for e in section.subuid_entries)
+    assert len(section.subgid_entries) >= 1
+    assert any("jdoe" in e for e in section.subgid_entries)
+
+    # System accounts excluded from raw entries
+    assert not any("root" in e for e in section.passwd_entries)
+    assert not any("nobody" in e for e in section.passwd_entries)
 
 
 def test_run_all_with_fixtures(host_root, fixture_executor):

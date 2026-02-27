@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from ..executor import Executor
 from ..schema import ContainerSection
+from . import filtered_rglob
 
 _DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
 
@@ -153,6 +154,26 @@ def run(
         "usr/share/containers/systemd",
         "etc/systemd/system",
     ]
+
+    # User-level quadlets: ~/.config/containers/systemd/ for each real user
+    passwd = host_root / "etc/passwd"
+    try:
+        if passwd.exists():
+            for line in passwd.read_text().splitlines():
+                parts = line.split(":")
+                if len(parts) >= 7:
+                    try:
+                        uid = int(parts[2])
+                    except ValueError:
+                        continue
+                    if 1000 <= uid < 60000:
+                        home = parts[5].lstrip("/")
+                        quadlet_dirs.append(
+                            f"{home}/.config/containers/systemd"
+                        )
+    except (PermissionError, OSError):
+        pass
+
     for subdir in quadlet_dirs:
         d = host_root / subdir
         try:
@@ -176,13 +197,13 @@ def run(
             })
 
     # --- Compose files ---
-    for search_dir in ("opt", "srv", "home", "etc"):
+    for search_dir in ("opt", "srv", "etc"):
         d = host_root / search_dir
         if not d.exists():
             continue
         for pattern in ("docker-compose*.yml", "docker-compose*.yaml",
                         "compose*.yml", "compose*.yaml"):
-            for f in _safe_rglob(d, pattern):
+            for f in filtered_rglob(d, pattern):
                 if not f.is_file():
                     continue
                 content = _safe_read(f)

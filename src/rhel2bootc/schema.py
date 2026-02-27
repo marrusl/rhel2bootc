@@ -200,6 +200,12 @@ class UserGroupSection(BaseModel):
     groups: List[dict] = Field(default_factory=list)  # name, gid
     sudoers_rules: List[str] = Field(default_factory=list)
     ssh_authorized_keys_refs: List[dict] = Field(default_factory=list)  # user, path
+    passwd_entries: List[str] = Field(default_factory=list)
+    shadow_entries: List[str] = Field(default_factory=list)
+    group_entries: List[str] = Field(default_factory=list)
+    gshadow_entries: List[str] = Field(default_factory=list)
+    subuid_entries: List[str] = Field(default_factory=list)
+    subgid_entries: List[str] = Field(default_factory=list)
 
 
 # --- Root snapshot ---

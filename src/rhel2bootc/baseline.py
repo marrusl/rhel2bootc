@@ -648,10 +648,12 @@ def get_baseline_packages(
 
     comps_data = parse_comps_xml(xml_content)
     if profile_override:
-        profile = profile_override.lstrip("@")
+        profile = profile_override.lstrip("@").lstrip("^")
         _debug(f"using --profile override: {profile}")
     else:
         profile = detect_profile(host_root)
+        if profile:
+            profile = profile.lstrip("^")
 
     resolved_id = _resolve_profile_id(comps_data, profile)
     if not resolved_id:

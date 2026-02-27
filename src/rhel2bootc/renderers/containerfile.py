@@ -135,6 +135,23 @@ def _write_config_tree(snapshot: InspectionSnapshot, output_dir: Path) -> None:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(item["content"])
 
+    # User/group account fragment files for append-based provisioning
+    ug = snapshot.users_groups
+    if ug:
+        etc_dir = config_dir / "etc"
+        etc_dir.mkdir(parents=True, exist_ok=True)
+        for attr, filename in (
+            ("passwd_entries", "passwd.append"),
+            ("shadow_entries", "shadow.append"),
+            ("group_entries", "group.append"),
+            ("gshadow_entries", "gshadow.append"),
+            ("subuid_entries", "subuid.append"),
+            ("subgid_entries", "subgid.append"),
+        ):
+            entries = getattr(ug, attr, [])
+            if entries:
+                (etc_dir / filename).write_text("\n".join(entries) + "\n")
+
     # Kernel module / sysctl / dracut configs
     if snapshot.kernel_boot:
         for kpath in (snapshot.kernel_boot.modules_load_d or []):
@@ -409,20 +426,48 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         lines.append("")
 
     # 9. Users and Groups
-    if snapshot.users_groups and (snapshot.users_groups.users or snapshot.users_groups.groups):
+    ug = snapshot.users_groups
+    if ug and (ug.passwd_entries or ug.users):
         lines.append("# === Users and Groups ===")
-        for g in (snapshot.users_groups.groups or [])[:10]:
-            name, gid = g.get("name", ""), g.get("gid", "")
-            if name and gid:
-                lines.append(f"RUN groupadd -g {gid} {name}")
-        for u in (snapshot.users_groups.users or [])[:10]:
-            name, uid, gid = u.get("name", ""), u.get("uid", ""), u.get("gid", "")
-            shell = u.get("shell", "")
-            if name and uid:
-                gid_opt = f" -g {gid}" if gid else ""
-                shell_opt = f" -s {shell}" if shell and shell != "/sbin/nologin" else ""
-                lines.append(f"RUN useradd -u {uid}{gid_opt}{shell_opt} -m {name}")
-        if snapshot.users_groups.ssh_authorized_keys_refs:
+        if ug.passwd_entries:
+            append_files = ["group", "passwd", "shadow", "gshadow"]
+            copy_lines = []
+            cat_parts = []
+            for name in append_files:
+                attr = f"{name}_entries"
+                if getattr(ug, attr, []):
+                    copy_lines.append(f"COPY config/etc/{name}.append /tmp/{name}.append")
+                    cat_parts.append(f"cat /tmp/{name}.append >> /etc/{name}")
+            for sub in ("subuid", "subgid"):
+                attr = f"{sub}_entries"
+                if getattr(ug, attr, []):
+                    copy_lines.append(f"COPY config/etc/{sub}.append /tmp/{sub}.append")
+                    cat_parts.append(f"cat /tmp/{sub}.append >> /etc/{sub}")
+            for cl in copy_lines:
+                lines.append(cl)
+            if cat_parts:
+                cat_parts.append("rm -f /tmp/*.append")
+                lines.append("RUN " + " && \\\n    ".join(cat_parts))
+            # Create home directories
+            for u in (ug.users or []):
+                home = u.get("home", "")
+                uid = u.get("uid", "")
+                name = u.get("name", "")
+                if home and home != "/" and name and uid:
+                    lines.append(f"RUN mkdir -p {home} && chown {uid}:{u.get('gid', uid)} {home}")
+        else:
+            for g in (ug.groups or [])[:10]:
+                gname, gid = g.get("name", ""), g.get("gid", "")
+                if gname and gid:
+                    lines.append(f"RUN groupadd -g {gid} {gname}")
+            for u in (ug.users or [])[:10]:
+                uname, uid, gid = u.get("name", ""), u.get("uid", ""), u.get("gid", "")
+                shell = u.get("shell", "")
+                if uname and uid:
+                    gid_opt = f" -g {gid}" if gid else ""
+                    shell_opt = f" -s {shell}" if shell and shell != "/sbin/nologin" else ""
+                    lines.append(f"RUN useradd -u {uid}{gid_opt}{shell_opt} -m {uname}")
+        if ug.ssh_authorized_keys_refs:
             lines.append("# NOTE: SSH authorized_keys detected — handle manually (do not bake keys into image)")
         lines.append("")
 

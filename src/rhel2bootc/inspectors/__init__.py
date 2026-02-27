@@ -6,12 +6,67 @@ Each inspector receives host_root and an executor; returns a section for the sna
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional, TypeVar
+from typing import Callable, List, Optional, TypeVar
 
 from ..executor import Executor, make_executor
 from ..schema import InspectionSnapshot, OsRelease
 
 T = TypeVar("T")
+
+# Directories whose entire subtrees should be pruned when doing recursive
+# scans under /home, /opt, /srv.  Presence of any of these as an immediate
+# child of a directory causes the scanner to skip that directory and everything
+# below it — this prevents source-code checkouts, build trees, and IDE
+# metadata from appearing as operator-deployed software.
+_PRUNE_MARKERS = frozenset({".git", ".svn", ".hg"})
+
+# Additional directory names that are always skipped (never descended into).
+_SKIP_DIR_NAMES = frozenset({
+    "__pycache__", ".mypy_cache", ".pytest_cache", ".tox", ".nox",
+    "node_modules", ".eggs",
+    ".vscode", ".idea", ".cursor",
+})
+
+
+def is_dev_artifact(path: Path) -> bool:
+    """Return True if any component of *path* sits inside a dev/build directory."""
+    for part in path.parts:
+        if part in _SKIP_DIR_NAMES or part in _PRUNE_MARKERS:
+            return True
+    return False
+
+
+def filtered_rglob(root: Path, pattern: str) -> List[Path]:
+    """Like Path.rglob but prunes source-code checkouts and build dirs.
+
+    A directory is pruned (not descended into) when it:
+      - contains a VCS marker (.git, .svn, .hg), or
+      - has a name in the skip list (node_modules, __pycache__, …).
+
+    Only files matching *pattern* (a simple glob like ``*.yml``) from
+    non-pruned subtrees are yielded.
+    """
+    import fnmatch
+    results: List[Path] = []
+
+    def _walk(d: Path) -> None:
+        try:
+            entries = sorted(d.iterdir())
+        except (PermissionError, OSError):
+            return
+
+        child_names = {e.name for e in entries}
+        if child_names & _PRUNE_MARKERS:
+            return
+
+        for entry in entries:
+            if entry.is_file() and fnmatch.fnmatch(entry.name, pattern):
+                results.append(entry)
+            elif entry.is_dir() and entry.name not in _SKIP_DIR_NAMES:
+                _walk(entry)
+
+    _walk(root)
+    return results
 
 
 def _safe_run(name: str, fn: Callable[[], T], default: T, warnings: list) -> T:

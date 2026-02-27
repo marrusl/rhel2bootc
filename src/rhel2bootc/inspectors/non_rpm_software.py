@@ -1,21 +1,35 @@
 """Non-RPM Software inspector.
 
-Scans /opt, /usr/local for:
+Scans /opt, /srv, /usr/local for:
   - readelf-based binary classification (Go, Rust, dynamic/static C/C++)
   - pip dist-info packages & venv detection (system-site-packages flag)
   - pip list --path for live venvs
   - npm/yarn/gem lockfiles
   - git-managed directories (remote URL + commit hash)
   - generic directory scan with optional deep strings scan
+
+User home directories (/home) are intentionally excluded — artifacts found
+there are overwhelmingly development checkouts, not deployed services.
 """
 
 import configparser
+import os
 import re
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from ..executor import Executor
 from ..schema import NonRpmSoftwareSection
+from . import is_dev_artifact, filtered_rglob
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] non-rpm: {msg}", file=sys.stderr)
+
 
 VERSION_PATTERNS = [
     re.compile(rb"version\s*[=:]\s*[\"']?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.I),
@@ -63,8 +77,10 @@ def _classify_binary(executor: Optional[Executor], path: Path) -> Optional[dict]
     if not executor:
         return None
 
+    _debug(f"readelf -S {path}")
     r = executor(["readelf", "-S", str(path)])
     if r.returncode != 0:
+        _debug(f"readelf -S failed (rc={r.returncode}): {r.stderr.strip()[:200]}")
         return None
 
     sections_output = r.stdout
@@ -72,7 +88,6 @@ def _classify_binary(executor: Optional[Executor], path: Path) -> Optional[dict]
     is_go = ".note.go.buildid" in sections_output or ".gopclntab" in sections_output
     is_rust = ".rustc" in sections_output
 
-    # Dynamic linking info
     rd = executor(["readelf", "-d", str(path)])
     dynamic_output = rd.stdout if rd.returncode == 0 else ""
     is_static = "no dynamic section" in dynamic_output.lower() or not dynamic_output.strip()
@@ -83,24 +98,13 @@ def _classify_binary(executor: Optional[Executor], path: Path) -> Optional[dict]
             if m:
                 shared_libs.append(m.group(1))
 
-    if is_go:
-        return {
-            "lang": "go",
-            "static": is_static,
-            "shared_libs": shared_libs,
-        }
-    elif is_rust:
-        return {
-            "lang": "rust",
-            "static": is_static,
-            "shared_libs": shared_libs,
-        }
-    else:
-        return {
-            "lang": "c/c++",
-            "static": is_static,
-            "shared_libs": shared_libs,
-        }
+    lang = "go" if is_go else ("rust" if is_rust else "c/c++")
+    _debug(f"classified {path.name}: lang={lang} static={is_static} libs={len(shared_libs)}")
+    return {
+        "lang": lang,
+        "static": is_static,
+        "shared_libs": shared_libs,
+    }
 
 
 def _is_binary(executor: Optional[Executor], host_root: Path, path: Path) -> bool:
@@ -108,9 +112,12 @@ def _is_binary(executor: Optional[Executor], host_root: Path, path: Path) -> boo
         return False
     r = executor(["file", "-b", str(path)])
     if r.returncode != 0:
+        _debug(f"file -b failed for {path} (rc={r.returncode}): {r.stderr.strip()[:200]}")
         return False
     out = r.stdout.lower()
-    return "elf" in out or "executable" in out or "script" in out
+    result = "elf" in out or "executable" in out or "script" in out
+    _debug(f"file -b {path.name}: {r.stdout.strip()[:80]} -> binary={result}")
+    return result
 
 
 def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optional[int] = None) -> Optional[str]:
@@ -185,14 +192,14 @@ def _scan_git_repo(host_root: Path, d: Path) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def _find_venvs(host_root: Path) -> List[Tuple[Path, bool]]:
-    """Find Python venvs under /opt, /srv, /home. Returns (venv_path, system_site_packages)."""
+    """Find Python venvs under /opt, /srv. Returns (venv_path, system_site_packages)."""
     results: List[Tuple[Path, bool]] = []
-    for search_root in ("opt", "srv", "home"):
+    for search_root in ("opt", "srv"):
         d = host_root / search_root
         if not d.exists():
             continue
         try:
-            for cfg in d.rglob("pyvenv.cfg"):
+            for cfg in filtered_rglob(d, "pyvenv.cfg"):
                 if not cfg.is_file():
                     continue
                 venv_dir = cfg.parent
@@ -300,6 +307,7 @@ def _classify_file(
         "method": "file scan",
     }
     if not executor:
+        _debug(f"classify {f.name}: no executor, returning low confidence")
         return item
 
     binary_info = _classify_binary(executor, f)
@@ -319,6 +327,7 @@ def _classify_file(
             item["method"] = "strings" if deep else "strings (first 4KB)"
             item["confidence"] = "medium"
 
+    _debug(f"classify {f.name}: confidence={item['confidence']} method={item['method']}")
     return item
 
 
@@ -362,6 +371,8 @@ def _scan_dirs(
             continue
         for entry in _safe_iterdir(d):
             if not entry.is_dir() or entry.name.startswith("."):
+                continue
+            if is_dev_artifact(entry):
                 continue
             if base == "usr/local" and entry.name in _FHS_DIRS and not _dir_has_content(entry):
                 continue
@@ -447,18 +458,19 @@ def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optiona
         except Exception:
             continue
 
-    for venv_root in ("opt", "srv", "home"):
+    for venv_root in ("opt", "srv"):
         d = host_root / venv_root
         if not d.exists():
             continue
         try:
-            for req in d.rglob("requirements.txt"):
-                if req.is_file():
-                    try:
-                        content = req.read_text()
-                    except (PermissionError, OSError):
-                        content = ""
-                    section.items.append({
+            for req in filtered_rglob(d, "requirements.txt"):
+                if not req.is_file():
+                    continue
+                try:
+                    content = req.read_text()
+                except (PermissionError, OSError):
+                    content = ""
+                section.items.append({
                         "path": str(req.relative_to(host_root)),
                         "name": "requirements.txt",
                         "confidence": "high",
@@ -488,51 +500,54 @@ def _read_lockfile_dir(d: Path) -> dict:
 
 
 def _scan_npm(section: NonRpmSoftwareSection, host_root: Path) -> None:
-    for search_root in ("opt", "srv", "home", "usr/local"):
+    for search_root in ("opt", "srv", "usr/local"):
         d = host_root / search_root
         if not d.exists():
             continue
         try:
-            for lock in d.rglob("package-lock.json"):
-                if lock.is_file():
-                    files = _read_lockfile_dir(lock.parent)
-                    section.items.append({
-                        "path": str(lock.parent.relative_to(host_root)),
-                        "name": lock.parent.name,
-                        "confidence": "high",
-                        "method": "npm package-lock.json",
-                        "files": files,
-                    })
-            for lock in d.rglob("yarn.lock"):
-                if lock.is_file():
-                    files = _read_lockfile_dir(lock.parent)
-                    section.items.append({
-                        "path": str(lock.parent.relative_to(host_root)),
-                        "name": lock.parent.name,
-                        "confidence": "high",
-                        "method": "yarn.lock",
-                        "files": files,
-                    })
+            for lock in filtered_rglob(d, "package-lock.json"):
+                if not lock.is_file():
+                    continue
+                files = _read_lockfile_dir(lock.parent)
+                section.items.append({
+                    "path": str(lock.parent.relative_to(host_root)),
+                    "name": lock.parent.name,
+                    "confidence": "high",
+                    "method": "npm package-lock.json",
+                    "files": files,
+                })
+            for lock in filtered_rglob(d, "yarn.lock"):
+                if not lock.is_file():
+                    continue
+                files = _read_lockfile_dir(lock.parent)
+                section.items.append({
+                    "path": str(lock.parent.relative_to(host_root)),
+                    "name": lock.parent.name,
+                    "confidence": "high",
+                    "method": "yarn.lock",
+                    "files": files,
+                })
         except Exception:
             continue
 
 
 def _scan_gem(section: NonRpmSoftwareSection, host_root: Path) -> None:
-    for search_root in ("opt", "srv", "home", "usr/local"):
+    for search_root in ("opt", "srv", "usr/local"):
         d = host_root / search_root
         if not d.exists():
             continue
         try:
-            for lock in d.rglob("Gemfile.lock"):
-                if lock.is_file():
-                    files = _read_lockfile_dir(lock.parent)
-                    section.items.append({
-                        "path": str(lock.parent.relative_to(host_root)),
-                        "name": lock.parent.name,
-                        "confidence": "high",
-                        "method": "gem Gemfile.lock",
-                        "files": files,
-                    })
+            for lock in filtered_rglob(d, "Gemfile.lock"):
+                if not lock.is_file():
+                    continue
+                files = _read_lockfile_dir(lock.parent)
+                section.items.append({
+                    "path": str(lock.parent.relative_to(host_root)),
+                    "name": lock.parent.name,
+                    "confidence": "high",
+                    "method": "gem Gemfile.lock",
+                    "files": files,
+                })
         except Exception:
             continue
 

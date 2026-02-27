@@ -1,11 +1,20 @@
 """SELinux/Security inspector: mode, modules, booleans, audit rules, FIPS, PAM. File-based + executor."""
 
+import os
 import re
+import sys
 from pathlib import Path
 from typing import List, Optional
 
 from ..executor import Executor
 from ..schema import SelinuxSection
+
+_DEBUG = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
+
+
+def _debug(msg: str) -> None:
+    if _DEBUG:
+        print(f"[rhel2bootc] selinux: {msg}", file=sys.stderr)
 
 
 def _safe_iterdir(d: Path) -> List[Path]:
@@ -29,30 +38,31 @@ def _policy_type(host_root: Path) -> str:
     return "targeted"
 
 
-def _discover_custom_modules(
-    host_root: Path, all_modules: List[str], policy_type: str,
-) -> List[str]:
-    """Cross-reference semodule output with the priority-400 module store.
+def _discover_custom_modules(host_root: Path, policy_type: str) -> List[str]:
+    """Discover custom modules from the priority-400 module store.
 
-    Modules at priority 400 were installed locally via ``semodule -i`` and
-    are therefore custom.  If the priority-400 directory is unreadable we
-    fall back to returning nothing (safe default).
+    Modules at priority 400 were installed locally via ``semodule -i``.
+    This is purely filesystem-based — no need for ``semodule`` command.
     """
     local_store = (
         host_root / "etc/selinux" / policy_type / "active/modules/400"
     )
+    _debug(f"custom modules: checking {local_store}")
     try:
         if not local_store.is_dir():
+            _debug(f"custom modules: {local_store} not a directory or missing")
             return []
-    except (PermissionError, OSError):
+    except (PermissionError, OSError) as e:
+        _debug(f"custom modules: {local_store} access error: {e}")
         return []
 
-    local_names = set()
+    local_names = []
     for child in _safe_iterdir(local_store):
         if child.is_dir():
-            local_names.add(child.name)
+            local_names.append(child.name)
 
-    return sorted(m for m in all_modules if m in local_names)
+    _debug(f"custom modules: found {len(local_names)} in priority-400 store: {local_names}")
+    return sorted(local_names)
 
 
 _BOOL_RE = re.compile(
@@ -85,6 +95,41 @@ def _parse_semanage_booleans(text: str) -> List[dict]:
     return results
 
 
+def _read_booleans_from_fs(host_root: Path) -> List[dict]:
+    """Fallback: read boolean runtime values from /sys/fs/selinux/booleans/.
+
+    Returns only booleans whose current value differs from the pending
+    (policy-loaded) value.  Without semanage we cannot get descriptions.
+    """
+    booldir = host_root / "sys/fs/selinux/booleans"
+    _debug(f"boolean fs fallback: checking {booldir}")
+    if not booldir.is_dir():
+        _debug(f"boolean fs fallback: {booldir} not found")
+        return []
+
+    results: List[dict] = []
+    for f in _safe_iterdir(booldir):
+        if not f.is_file():
+            continue
+        try:
+            parts = f.read_text().strip().split()
+        except (PermissionError, OSError):
+            continue
+        if len(parts) >= 2:
+            current = "on" if parts[0] == "1" else "off"
+            pending = "on" if parts[1] == "1" else "off"
+            if current != pending:
+                results.append({
+                    "name": f.name,
+                    "current": current,
+                    "default": pending,
+                    "non_default": True,
+                    "description": "",
+                })
+    _debug(f"boolean fs fallback: found {len(results)} non-default booleans")
+    return results
+
+
 def run(
     host_root: Path,
     executor: Optional[Executor],
@@ -104,31 +149,23 @@ def run(
         pass
 
     ptype = _policy_type(host_root)
+    _debug(f"policy type: {ptype}")
 
-    # --- Custom modules via semodule -l + priority-400 store ---
-    if executor:
-        try:
-            out = executor(["semodule", "-l"])
-            if out.returncode == 0 and out.stdout:
-                all_modules = [
-                    ln.split()[0]
-                    for ln in out.stdout.splitlines()
-                    if ln.strip()
-                ]
-                section.custom_modules = _discover_custom_modules(
-                    host_root, all_modules, ptype,
-                )
-        except Exception:
-            pass
+    # --- Custom modules from priority-400 store (filesystem only) ---
+    section.custom_modules = _discover_custom_modules(host_root, ptype)
 
-    # --- Boolean overrides via semanage boolean -l ---
+    # --- Boolean overrides via chroot semanage, with filesystem fallback ---
     if executor:
-        try:
-            out = executor(["semanage", "boolean", "-l"])
-            if out.returncode == 0 and out.stdout:
-                section.boolean_overrides = _parse_semanage_booleans(out.stdout)
-        except Exception:
-            pass
+        # Try the host's own semanage via chroot (works against host policy)
+        _debug("trying: chroot /host semanage boolean -l")
+        out = executor(["chroot", str(host_root), "semanage", "boolean", "-l"])
+        if out.returncode == 0 and out.stdout.strip():
+            _debug(f"semanage boolean -l succeeded ({len(out.stdout.splitlines())} lines)")
+            section.boolean_overrides = _parse_semanage_booleans(out.stdout)
+        else:
+            _debug(f"semanage failed (rc={out.returncode}): {out.stderr.strip()[:200]}")
+            # Fallback: try reading /sys/fs/selinux/booleans/ from the host
+            section.boolean_overrides = _read_booleans_from_fs(host_root)
 
     audit_d = host_root / "etc/audit/rules.d"
     if audit_d.exists():
