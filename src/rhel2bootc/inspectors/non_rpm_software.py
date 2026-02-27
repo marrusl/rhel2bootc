@@ -1,8 +1,18 @@
-"""Non-RPM Software inspector: /opt, /usr/local, pip/npm/gem. File-based scan. Optional deep strings scan."""
+"""Non-RPM Software inspector.
 
+Scans /opt, /usr/local for:
+  - readelf-based binary classification (Go, Rust, dynamic/static C/C++)
+  - pip dist-info packages & venv detection (system-site-packages flag)
+  - pip list --path for live venvs
+  - npm/yarn/gem lockfiles
+  - git-managed directories (remote URL + commit hash)
+  - generic directory scan with optional deep strings scan
+"""
+
+import configparser
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from ..executor import Executor
 from ..schema import NonRpmSoftwareSection
@@ -12,6 +22,85 @@ VERSION_PATTERNS = [
     re.compile(rb"v([0-9]+\.[0-9]+(?:\.[0-9]+)?)[\s\-]"),
     re.compile(rb"([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$|\))"),
 ]
+
+
+def _safe_iterdir(d: Path) -> List[Path]:
+    try:
+        return list(d.iterdir())
+    except (PermissionError, OSError):
+        return []
+
+
+def _safe_read(p: Path) -> str:
+    try:
+        return p.read_text()
+    except (PermissionError, OSError):
+        return ""
+
+
+_FHS_DIRS = frozenset({
+    "bin", "etc", "games", "include", "lib", "lib64", "libexec",
+    "sbin", "share", "src", "man",
+})
+
+
+def _dir_has_content(d: Path) -> bool:
+    try:
+        for p in d.rglob("*"):
+            if p.is_file():
+                return True
+    except (PermissionError, OSError):
+        pass
+    return False
+
+
+# ---------------------------------------------------------------------------
+# readelf-based binary classification
+# ---------------------------------------------------------------------------
+
+def _classify_binary(executor: Optional[Executor], path: Path) -> Optional[dict]:
+    """Use readelf to classify a binary. Returns classification dict or None."""
+    if not executor:
+        return None
+
+    r = executor(["readelf", "-S", str(path)])
+    if r.returncode != 0:
+        return None
+
+    sections_output = r.stdout
+
+    is_go = ".note.go.buildid" in sections_output or ".gopclntab" in sections_output
+    is_rust = ".rustc" in sections_output
+
+    # Dynamic linking info
+    rd = executor(["readelf", "-d", str(path)])
+    dynamic_output = rd.stdout if rd.returncode == 0 else ""
+    is_static = "no dynamic section" in dynamic_output.lower() or not dynamic_output.strip()
+    shared_libs: List[str] = []
+    for line in dynamic_output.splitlines():
+        if "(NEEDED)" in line:
+            m = re.search(r"\[(.+?)\]", line)
+            if m:
+                shared_libs.append(m.group(1))
+
+    if is_go:
+        return {
+            "lang": "go",
+            "static": is_static,
+            "shared_libs": shared_libs,
+        }
+    elif is_rust:
+        return {
+            "lang": "rust",
+            "static": is_static,
+            "shared_libs": shared_libs,
+        }
+    else:
+        return {
+            "lang": "c/c++",
+            "static": is_static,
+            "shared_libs": shared_libs,
+        }
 
 
 def _is_binary(executor: Optional[Executor], host_root: Path, path: Path) -> bool:
@@ -42,33 +131,162 @@ def _strings_version(executor: Optional[Executor], path: Path, limit_kb: Optiona
     return None
 
 
-def _safe_iterdir(d: Path) -> list:
-    try:
-        return list(d.iterdir())
-    except (PermissionError, OSError):
-        return []
+# ---------------------------------------------------------------------------
+# Git repository detection
+# ---------------------------------------------------------------------------
+
+def _scan_git_repo(host_root: Path, d: Path) -> Optional[dict]:
+    """Check if a directory has .git and extract remote URL + commit hash."""
+    git_dir = d / ".git"
+    if not git_dir.is_dir():
+        return None
+
+    remote_url = ""
+    config_file = git_dir / "config"
+    if config_file.exists():
+        text = _safe_read(config_file)
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("url ="):
+                remote_url = stripped.split("=", 1)[1].strip()
+                break
+
+    commit_hash = ""
+    head = git_dir / "HEAD"
+    if head.exists():
+        head_content = _safe_read(head).strip()
+        if head_content.startswith("ref:"):
+            ref_path = git_dir / head_content.split(":", 1)[1].strip()
+            if ref_path.exists():
+                commit_hash = _safe_read(ref_path).strip()
+        else:
+            commit_hash = head_content
+
+    branch = ""
+    head_content = _safe_read(head).strip() if head.exists() else ""
+    if head_content.startswith("ref:"):
+        ref = head_content.split(":", 1)[1].strip()
+        if ref.startswith("refs/heads/"):
+            branch = ref[len("refs/heads/"):]
+
+    return {
+        "path": str(d.relative_to(host_root)),
+        "name": d.name,
+        "method": "git repository",
+        "confidence": "high",
+        "git_remote": remote_url,
+        "git_commit": commit_hash,
+        "git_branch": branch,
+    }
 
 
-# Standard FHS directories under /usr/local that are always present and
-# should only be reported if they contain actual user-installed content.
-_FHS_DIRS = frozenset({
-    "bin", "etc", "games", "include", "lib", "lib64", "libexec",
-    "sbin", "share", "src", "man",
-})
+# ---------------------------------------------------------------------------
+# Venv detection and pip list --path
+# ---------------------------------------------------------------------------
+
+def _find_venvs(host_root: Path) -> List[Tuple[Path, bool]]:
+    """Find Python venvs under /opt, /srv, /home. Returns (venv_path, system_site_packages)."""
+    results: List[Tuple[Path, bool]] = []
+    for search_root in ("opt", "srv", "home"):
+        d = host_root / search_root
+        if not d.exists():
+            continue
+        try:
+            for cfg in d.rglob("pyvenv.cfg"):
+                if not cfg.is_file():
+                    continue
+                venv_dir = cfg.parent
+                text = _safe_read(cfg)
+                system_sp = False
+                for line in text.splitlines():
+                    stripped = line.strip().lower()
+                    if stripped.startswith("include-system-site-packages"):
+                        system_sp = "true" in stripped
+                        break
+                results.append((venv_dir, system_sp))
+        except (PermissionError, OSError):
+            continue
+    return results
 
 
-def _dir_has_content(d: Path) -> bool:
-    """Return True if d contains at least one regular file (at any depth)."""
-    try:
-        for p in d.rglob("*"):
-            if p.is_file():
-                return True
-    except (PermissionError, OSError):
-        pass
-    return False
+def _scan_venv_packages(
+    section: NonRpmSoftwareSection,
+    host_root: Path,
+    executor: Optional[Executor],
+) -> None:
+    """Discover venvs, scan dist-info inside them, and run pip list --path if possible."""
+    venvs = _find_venvs(host_root)
+
+    for venv_path, system_sp in venvs:
+        rel = str(venv_path.relative_to(host_root))
+        packages: List[dict] = []
+
+        # Scan dist-info inside the venv
+        try:
+            for sp_dir in venv_path.rglob("site-packages"):
+                if not sp_dir.is_dir():
+                    continue
+                for dist_info in sp_dir.glob("*.dist-info"):
+                    stem = dist_info.name.replace(".dist-info", "")
+                    parts = stem.split("-")
+                    name, version = stem, ""
+                    for idx, part in enumerate(parts):
+                        if part and part[0].isdigit():
+                            name = "-".join(parts[:idx])
+                            version = "-".join(parts[idx:])
+                            break
+                    packages.append({"name": name, "version": version})
+        except (PermissionError, OSError):
+            pass
+
+        # Try pip list --path for a richer package list
+        if executor:
+            try:
+                sp_paths = list(venv_path.rglob("site-packages"))
+                for sp_path in sp_paths:
+                    if sp_path.is_dir():
+                        r = executor(["pip", "list", "--path", str(sp_path), "--format", "columns"])
+                        if r.returncode == 0 and r.stdout.strip():
+                            pip_packages = _parse_pip_list(r.stdout)
+                            if pip_packages:
+                                packages = pip_packages
+                        break
+            except Exception:
+                pass
+
+        section.items.append({
+            "path": rel,
+            "name": venv_path.name,
+            "method": "python venv",
+            "confidence": "high",
+            "system_site_packages": system_sp,
+            "packages": packages,
+        })
 
 
-def _scan_dirs(section: NonRpmSoftwareSection, host_root: Path, executor: Optional[Executor], deep: bool) -> None:
+def _parse_pip_list(output: str) -> List[dict]:
+    """Parse `pip list` columnar output into [{name, version}]."""
+    results: List[dict] = []
+    lines = output.strip().splitlines()
+    for line in lines:
+        if line.startswith("---") or line.startswith("Package"):
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            results.append({"name": parts[0], "version": parts[1]})
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Existing scanners (pip dist-info, npm, gem, directory scan)
+# ---------------------------------------------------------------------------
+
+def _scan_dirs(
+    section: NonRpmSoftwareSection,
+    host_root: Path,
+    executor: Optional[Executor],
+    deep: bool,
+) -> None:
     """Scan /opt and /usr/local for non-RPM software directories."""
     for base in ("opt", "usr/local"):
         d = host_root / base
@@ -79,12 +297,39 @@ def _scan_dirs(section: NonRpmSoftwareSection, host_root: Path, executor: Option
                 continue
             if base == "usr/local" and entry.name in _FHS_DIRS and not _dir_has_content(entry):
                 continue
-            item: dict = {"path": str(entry.relative_to(host_root)), "name": entry.name, "confidence": "low", "method": "directory scan"}
+
+            # Check for git repo first
+            git_info = _scan_git_repo(host_root, entry)
+            if git_info:
+                section.items.append(git_info)
+                continue
+
+            # Check for venv (handled separately)
+            if (entry / "pyvenv.cfg").exists():
+                continue
+
+            item: dict = {
+                "path": str(entry.relative_to(host_root)),
+                "name": entry.name,
+                "confidence": "low",
+                "method": "directory scan",
+            }
+
             if executor:
                 try:
                     for f in entry.rglob("*"):
                         if not f.is_file():
                             continue
+                        # Try readelf classification first
+                        binary_info = _classify_binary(executor, f)
+                        if binary_info:
+                            item["lang"] = binary_info["lang"]
+                            item["static"] = binary_info["static"]
+                            item["shared_libs"] = binary_info["shared_libs"]
+                            item["confidence"] = "high"
+                            item["method"] = f"readelf ({binary_info['lang']})"
+                            break
+                        # Fall back to file+strings
                         if _is_binary(executor, host_root, f):
                             limit = None if deep else 4
                             ver = _strings_version(executor, f, limit_kb=limit)
@@ -95,11 +340,12 @@ def _scan_dirs(section: NonRpmSoftwareSection, host_root: Path, executor: Option
                                 break
                 except Exception:
                     pass
+
             section.items.append(item)
 
 
 def _scan_pip(section: NonRpmSoftwareSection, host_root: Path, executor: Optional[Executor]) -> None:
-    """Detect pip-installed packages by scanning dist-info directories."""
+    """Detect pip-installed packages by scanning system dist-info directories."""
     for search_root in ("usr/lib/python3", "usr/lib64/python3", "usr/local/lib/python3"):
         base = host_root / search_root
         if not base.exists():
@@ -159,10 +405,6 @@ _LOCKFILE_NAMES = frozenset({
 
 
 def _read_lockfile_dir(d: Path) -> dict:
-    """Read lockfile-related files from a project directory.
-
-    Returns {filename: content} for files relevant to reproducible installs.
-    """
     result: dict = {}
     for name in _LOCKFILE_NAMES:
         f = d / name
@@ -175,7 +417,6 @@ def _read_lockfile_dir(d: Path) -> dict:
 
 
 def _scan_npm(section: NonRpmSoftwareSection, host_root: Path) -> None:
-    """Detect npm projects by scanning for package-lock.json and yarn.lock."""
     for search_root in ("opt", "srv", "home", "usr/local"):
         d = host_root / search_root
         if not d.exists():
@@ -206,7 +447,6 @@ def _scan_npm(section: NonRpmSoftwareSection, host_root: Path) -> None:
 
 
 def _scan_gem(section: NonRpmSoftwareSection, host_root: Path) -> None:
-    """Detect Ruby gems by scanning for Gemfile.lock."""
     for search_root in ("opt", "srv", "home", "usr/local"):
         d = host_root / search_root
         if not d.exists():
@@ -226,6 +466,10 @@ def _scan_gem(section: NonRpmSoftwareSection, host_root: Path) -> None:
             continue
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 def run(
     host_root: Path,
     executor: Optional[Executor],
@@ -235,6 +479,7 @@ def run(
     host_root = Path(host_root)
 
     _scan_dirs(section, host_root, executor, deep_binary_scan)
+    _scan_venv_packages(section, host_root, executor)
     _scan_pip(section, host_root, executor)
     _scan_npm(section, host_root)
     _scan_gem(section, host_root)

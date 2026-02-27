@@ -1,0 +1,6 @@
+Package    Version
+---------- -------
+Django     4.2.7
+gunicorn   21.2.0
+sqlparse   0.4.4
+asgiref    3.7.2
