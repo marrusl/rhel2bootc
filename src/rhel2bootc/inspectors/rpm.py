@@ -191,15 +191,15 @@ def _dnf_history_removed(executor: Executor, host_root: Path) -> List[str]:
 _DEP_SCRIPT = """\
 import rpm, sys
 ts = rpm.TransactionSet()
-mode = sys.argv[1]
+tag = rpm.RPMTAG_PROVIDENAME if sys.argv[1] == 'P' else rpm.RPMTAG_REQUIRENAME
 mi = ts.dbMatch()
 for h in mi:
     name = h['name']
-    deps = h.dsFromHeader(mode)
-    for d in deps:
-        n = d.N()
-        if n and not n.startswith('rpmlib('):
-            sys.stdout.write(name + '\\t' + n + '\\n')
+    deps = h[tag]
+    if deps:
+        for dep in deps:
+            if dep and not dep.startswith('rpmlib('):
+                sys.stdout.write(name + '\\t' + dep + '\\n')
 """
 
 
@@ -226,7 +226,7 @@ def _expand_baseline_deps(
         _debug(f"dep-expand: python3 rpm {tag_char}: rc={result.returncode} lines={lines}")
         if result.returncode != 0:
             _debug(f"dep-expand: stderr: {result.stderr.strip()[:300]}")
-        if result.returncode == 0 and lines >= len(installed_names):
+        if result.returncode == 0 and lines > 0:
             return result.stdout
         return ""
 
