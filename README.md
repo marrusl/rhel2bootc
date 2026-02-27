@@ -9,10 +9,10 @@ Inspect RHEL/CentOS hosts and produce bootc image artifacts (Containerfile, conf
 
 ## Usage
 
-All renderers write to the **output directory**, which is created if it does not exist. Default: `./yoinkc-output`.
+All renderers write to the **output directory**, which is created if it does not exist. Default: `./output`.
 
 ```bash
-# Inspect host mounted at /host, write to default ./yoinkc-output
+# Inspect host mounted at /host, write to default ./output
 yoinkc
 
 # Specify output directory
@@ -42,20 +42,20 @@ Build the tool image:
 podman build -t yoinkc .
 ```
 
-Run it against a host. **Typically you run the container on the host you are inspecting**, so both the host root and the output directory are bind-mounted from that same host. The tool reads the host via `/host` and writes artifacts to `--output-dir`; with the mount below, those artifacts end up on the host at `./yoinkc-output`.
+Run it against a host. **Typically you run the container on the host you are inspecting**, so both the host root and the output directory are bind-mounted from that same host. The tool reads the host via `/host` and writes artifacts to `--output-dir`; with the mount below, those artifacts end up on the host at `./output`.
 
 ```bash
 sudo podman run --rm \
   --pid=host \
   --security-opt label=disable \
   -v /:/host:ro \
-  -v ./yoinkc-output:/output:z \
+  -v ./output:/output:z \
   yoinkc --output-dir /output
 ```
 
 > **Note:** `--pid=host` allows the tool to reach the host's `podman` (via `nsenter`) for querying the bootc base image package list. Without it, baseline generation falls back to all-packages mode. `--security-opt label=disable` turns off SELinux label enforcement. The tool needs broad read access across the host filesystem — the container is a packaging convenience, not a security boundary.
 
-After the run, `./yoinkc-output` on the host contains the Containerfile, config tree, reports, and snapshot. You can then copy that directory off the host or push it to GitHub with `--push-to-github`. The HTML report (`report.html`) is **self-contained and portable**: all content is embedded, so you can share or archive that file alone.
+After the run, `./output` on the host contains the Containerfile, config tree, reports, and snapshot. You can then copy that directory off the host or push it to GitHub with `--push-to-github`. The HTML report (`report.html`) is **self-contained and portable**: all content is embedded, so you can share or archive that file alone.
 
 ---
 
@@ -174,7 +174,7 @@ Each inspector examines one aspect of the host and contributes a section to the 
 | Flag | Description |
 |------|-------------|
 | `--host-root PATH` | Root path for host inspection (default: `/host`) |
-| `-o, --output-dir DIR` | Output directory for all artifacts (default: `./yoinkc-output`) |
+| `-o, --output-dir DIR` | Output directory for all artifacts (default: `./output`) |
 | `--from-snapshot PATH` | Skip inspection; load snapshot from file and run renderers only |
 | `--inspect-only` | Run inspectors and save snapshot; do not run renderers |
 

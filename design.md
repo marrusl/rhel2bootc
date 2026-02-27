@@ -476,7 +476,7 @@ The default run is optimized for speed — it covers the vast majority of system
 
 | Flag | Default | Effect |
 |---|---|---|
-| `--output-dir DIR` | `./yoinkc-output/` | Directory to write all output artifacts to. Created if it doesn't exist. |
+| `--output-dir DIR` | `./output/` | Directory to write all output artifacts to. Created if it doesn't exist. |
 | `--baseline-packages FILE` | off | Path to a newline-separated list of package names for air-gapped environments where the base image cannot be queried via podman. |
 | `--validate` | off | After generating output, run `podman build` against the Containerfile to verify it builds successfully. Reports build errors with context so operators can fix issues before manual review. Requires `podman` on the host or in the tool container. |
 | `--config-diffs` | off | Extract RPM defaults via `rpm2cpio` and generate line-by-line diffs for modified config files. Requires RPMs to be in local cache or downloadable from repos. |

@@ -91,7 +91,7 @@ def push_to_github(
                 from github import Github
                 g = Github()
                 user = g.get_user()
-                name = repo_spec.split("/")[-1] if "/" in repo_spec else "yoinkc-output"
+                name = repo_spec.split("/")[-1] if "/" in repo_spec else "yoinkc"
                 gh_repo = user.create_repo(name, private=create_private, auto_init=False)
                 origin_url = gh_repo.clone_url
             except ImportError:

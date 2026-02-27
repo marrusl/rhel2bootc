@@ -23,8 +23,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--output-dir",
         dest="output_dir",
         type=Path,
-        default=Path("./yoinkc-output"),
-        help="Output directory for all artifacts (default: ./yoinkc-output)",
+        default=Path("./output"),
+        help="Output directory for all artifacts (default: ./output)",
     )
 
     # Snapshot load/save

@@ -10,7 +10,7 @@ from yoinkc.cli import parse_args
 def test_defaults():
     args = parse_args([])
     assert args.host_root == Path("/host")
-    assert args.output_dir == Path("./yoinkc-output")
+    assert args.output_dir == Path("./output")
     assert args.from_snapshot is None
     assert args.inspect_only is False
     assert args.baseline_packages is None
