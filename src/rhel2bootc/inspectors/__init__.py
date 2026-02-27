@@ -121,10 +121,7 @@ def _read_os_release(host_root: Path) -> Optional[OsRelease]:
 
 
 def _validate_supported_host(os_release: Optional[OsRelease], tool_root: Path) -> Optional[str]:
-    """Return error message if host is not supported, else None.
-
-    Baselines are generated from comps at runtime; we support any RHEL 9.x and CentOS Stream 9.
-    """
+    """Return error message if host is not supported, else None."""
     if not os_release or not os_release.version_id:
         return None
     vid = os_release.version_id
@@ -145,37 +142,6 @@ def _validate_supported_host(os_release: Optional[OsRelease], tool_root: Path) -
     return None
 
 
-def _profile_warning(host_root: Path) -> Optional[str]:
-    """If install profile could not be determined, return warning message."""
-    import os
-    _dbg = bool(os.environ.get("RHEL2BOOTC_DEBUG", ""))
-    for p in ("root/anaconda-ks.cfg", "root/original-ks.cfg"):
-        full = host_root / p
-        try:
-            exists = full.exists()
-            if _dbg:
-                print(f"[rhel2bootc] _profile_warning: {full} exists={exists}", file=sys.stderr)
-            if exists:
-                return None
-        except (PermissionError, OSError) as exc:
-            if _dbg:
-                print(f"[rhel2bootc] _profile_warning: {full} error: {exc}", file=sys.stderr)
-            continue
-    anaconda = host_root / "var/log/anaconda"
-    try:
-        a_exists = anaconda.exists()
-        if _dbg:
-            print(f"[rhel2bootc] _profile_warning: {anaconda} exists={a_exists}", file=sys.stderr)
-        if a_exists and any(anaconda.iterdir()):
-            return None
-    except (PermissionError, OSError) as exc:
-        if _dbg:
-            print(f"[rhel2bootc] _profile_warning: {anaconda} error: {exc}", file=sys.stderr)
-    return (
-        "Could not determine original install profile. Using '@minimal' baseline. "
-        "Some packages reported as 'added' may have been part of the original installation. "
-        "Review the package list in the audit report and remove false positives."
-    )
 
 
 def run_all(
@@ -185,8 +151,7 @@ def run_all(
     config_diffs: bool = False,
     deep_binary_scan: bool = False,
     query_podman: bool = False,
-    comps_file: Optional[Path] = None,
-    profile_override: Optional[str] = None,
+    baseline_packages_file: Optional[Path] = None,
 ) -> InspectionSnapshot:
     """Run all inspectors and return a merged snapshot."""
     host_root = Path(host_root)
@@ -212,20 +177,16 @@ def run_all(
         meta=meta,
         os_release=os_release,
     )
-    if not profile_override:
-        profile_warn = _profile_warning(host_root)
-        if profile_warn:
-            snapshot.warnings.append({"source": "rpm", "message": profile_warn, "severity": "warning"})
 
     w = snapshot.warnings
-    snapshot.rpm = _safe_run("rpm", lambda: run_rpm(host_root, executor, tool_root, comps_file=comps_file, profile_override=profile_override), None, w)
+    snapshot.rpm = _safe_run("rpm", lambda: run_rpm(host_root, executor, tool_root, baseline_packages_file=baseline_packages_file), None, w)
     if snapshot.rpm and snapshot.rpm.no_baseline:
         w.append({
             "source": "rpm",
             "message": (
-                "Could not fetch comps XML from configured repositories. "
+                "Could not query base image package list. "
                 "No baseline available — all installed packages will be included in the Containerfile. "
-                "To reduce image size, provide a comps file via --comps-file or manually trim the package list."
+                "To reduce image size, pull the base image first or provide a package list via --baseline-packages."
             ),
             "severity": "warning",
         })

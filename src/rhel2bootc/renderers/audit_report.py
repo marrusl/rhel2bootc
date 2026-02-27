@@ -38,7 +38,7 @@ def render(
     if no_baseline:
         lines.append(f"- Packages (no baseline — all installed): {n_added}")
     else:
-        lines.append(f"- Packages added (beyond baseline): {n_added}")
+        lines.append(f"- Packages added (beyond base image): {n_added}")
     lines.append(f"- Packages removed: {n_removed}")
     if n_modified:
         lines.append(f"- Packages with modified configs: {n_modified}")
@@ -54,7 +54,8 @@ def render(
             lines.append("*No baseline — showing all packages.*")
             lines.append("")
         elif snapshot.rpm.baseline_package_names:
-            lines.append(f"Baseline: {len(snapshot.rpm.baseline_package_names)} packages from detected profile.")
+            base_img = snapshot.rpm.base_image or "target base image"
+            lines.append(f"Baseline: {len(snapshot.rpm.baseline_package_names)} packages from `{base_img}`.")
             lines.append("")
         lines.append("### Added")
         for p in snapshot.rpm.packages_added[:50]:

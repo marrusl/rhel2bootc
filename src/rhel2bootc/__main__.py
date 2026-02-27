@@ -20,8 +20,7 @@ def _run_inspectors(host_root: Path, args) -> InspectionSnapshot:
         config_diffs=args.config_diffs,
         deep_binary_scan=args.deep_binary_scan,
         query_podman=args.query_podman,
-        comps_file=args.comps_file,
-        profile_override=args.profile,
+        baseline_packages_file=args.baseline_packages,
     )
 
 

@@ -40,19 +40,21 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Run inspectors and save snapshot to output; do not run renderers",
     )
 
-    # Air-gapped baseline
+    # Baseline
     parser.add_argument(
-        "--comps-file",
+        "--baseline-packages",
         type=Path,
         metavar="FILE",
-        help="Path to local comps XML for baseline generation (air-gapped environments)",
+        help="Path to a newline-separated list of package names for air-gapped "
+             "environments where the base image cannot be queried via podman.",
     )
     parser.add_argument(
         "--profile",
         type=str,
         metavar="NAME",
-        help="Override install profile for baseline (e.g. server, minimal, workstation). "
-             "Bypasses auto-detection from kickstart files.",
+        help="(Secondary) Use comps-based profile baseline instead of base image "
+             "comparison.  Useful for planning reports showing packages added "
+             "beyond a specific install profile.",
     )
 
     # Opt-in deeper inspection (design doc)

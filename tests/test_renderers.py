@@ -299,7 +299,7 @@ def test_renderers_no_baseline_mode():
 
 
 def test_renderers_baseline_available_mode():
-    """With baseline available (no_baseline=False), audit and Containerfile use 'beyond baseline' wording."""
+    """With baseline available (no_baseline=False), audit and Containerfile use 'beyond base image' wording."""
     rpm = RpmSection(
         packages_added=[PackageEntry(name="httpd", version="2.4", release="1.el9", arch="x86_64")],
         packages_removed=[],
@@ -318,10 +318,10 @@ def test_renderers_baseline_available_mode():
         out = Path(tmp)
         render_audit_report(snapshot, env, out)
         content = (out / "audit-report.md").read_text()
-        assert "beyond baseline" in content
+        assert "beyond base image" in content
         assert "No baseline" not in content
         render_containerfile(snapshot, env, out)
-        assert "added beyond baseline" in (out / "Containerfile").read_text()
+        assert "added beyond base image" in (out / "Containerfile").read_text()
         assert "No baseline" not in (out / "Containerfile").read_text()
 
 

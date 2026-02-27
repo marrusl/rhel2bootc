@@ -461,7 +461,7 @@ th { color: var(--muted); font-weight: 500; }
     # Packages section
     html_parts.append('<div id="section-packages" class="section"><h2>Packages</h2>')
     if snapshot.rpm and getattr(snapshot.rpm, "no_baseline", False):
-        html_parts.append("<p><em>No baseline — showing all packages.</em></p>")
+        html_parts.append("<p><em>No baseline — showing all packages. Pull the base image or provide --baseline-packages.</em></p>")
     if snapshot.rpm and snapshot.rpm.packages_added:
         html_parts.append("<table><thead><tr><th>Name</th><th>Version</th><th>Release</th><th>Arch</th></tr></thead><tbody>")
         for p in snapshot.rpm.packages_added[:100]:

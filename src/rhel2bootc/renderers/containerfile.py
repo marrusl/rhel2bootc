@@ -10,8 +10,10 @@ from jinja2 import Environment
 from ..schema import ConfigFileKind, InspectionSnapshot
 
 
-def _base_image_from_os_release(snapshot: InspectionSnapshot) -> str:
-    """Return FROM line base image based on os_release."""
+def _base_image_from_snapshot(snapshot: InspectionSnapshot) -> str:
+    """Return FROM line base image, preferring the one stored in the snapshot."""
+    if snapshot.rpm and snapshot.rpm.base_image:
+        return snapshot.rpm.base_image
     if not snapshot.os_release:
         return "registry.redhat.io/rhel9/rhel-bootc:9.6"
     osr = snapshot.os_release
@@ -204,7 +206,7 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
       network note → tmpfiles.d
     """
     lines = []
-    base = _base_image_from_os_release(snapshot)
+    base = _base_image_from_snapshot(snapshot)
     lines.append("# === Base Image ===")
     os_desc = "unknown"
     if snapshot.os_release:
@@ -229,7 +231,7 @@ def _render_containerfile_content(snapshot: InspectionSnapshot) -> str:
         if getattr(snapshot.rpm, "no_baseline", False):
             lines.append("# No baseline — including all installed packages")
         else:
-            lines.append(f"# Detected: {len(names)} packages added beyond baseline")
+            lines.append(f"# Detected: {len(names)} packages added beyond base image")
         lines.append("RUN dnf install -y \\")
         for n in names[:-1]:
             lines.append(f"    {n} \\")

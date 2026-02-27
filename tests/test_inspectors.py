@@ -18,12 +18,8 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def _fixture_executor(cmd, cwd=None):
     """Executor that returns fixture file content for known commands."""
     cmd_str = " ".join(cmd)
-    if "python3" in cmd and "dsFromHeader" in cmd_str:
-        if cmd[-1] == "P":
-            return RunResult(stdout=(FIXTURES / "rpm_provides.txt").read_text(), stderr="", returncode=0)
-        if cmd[-1] == "R":
-            return RunResult(stdout=(FIXTURES / "rpm_requires.txt").read_text(), stderr="", returncode=0)
-        return RunResult(stdout="", stderr="unknown tag", returncode=1)
+    if "podman" in cmd and "rpm" in cmd and "-qa" in cmd:
+        return RunResult(stdout=(FIXTURES / "base_image_packages.txt").read_text(), stderr="", returncode=0)
     if "rpm" in cmd and "-qa" in cmd:
         return RunResult(stdout=(FIXTURES / "rpm_qa_output.txt").read_text(), stderr="", returncode=0)
     if "rpm" in cmd and "-Va" in cmd:
@@ -126,25 +122,27 @@ def test_parse_rpm_va():
 
 
 def test_rpm_inspector_with_fixtures(host_root, fixture_executor):
-    """No comps available → no_baseline mode: all installed packages are 'added', tool continues."""
+    """With executor that can query base image, baseline is applied via podman."""
     from rhel2bootc.inspectors.rpm import run as run_rpm
     tool_root = Path(__file__).parent.parent
     section = run_rpm(host_root, fixture_executor, tool_root)
     assert section is not None
-    assert section.no_baseline is True
-    assert section.baseline_package_names is None
-    assert len(section.packages_added) > 0
-    assert "httpd" in [p.name for p in section.packages_added]
+    assert section.no_baseline is False
+    assert section.baseline_package_names is not None
+    assert "bash" in section.baseline_package_names
+    added_names = [p.name for p in section.packages_added]
+    assert "httpd" in added_names
+    assert "bash" not in added_names
     assert len(section.rpm_va) == 5
     assert len(section.repo_files) >= 1
     assert "old-daemon" in section.dnf_history_removed
 
 
-def test_rpm_inspector_with_comps_file(host_root, fixture_executor):
-    """With --comps-file, baseline is applied; only packages beyond baseline are 'added'."""
+def test_rpm_inspector_with_baseline_file(host_root, fixture_executor):
+    """With --baseline-packages, baseline is loaded from file."""
     from rhel2bootc.inspectors.rpm import run as run_rpm
-    comps_file = FIXTURES / "comps_minimal.xml"
-    section = run_rpm(host_root, fixture_executor, comps_file=comps_file)
+    baseline_file = FIXTURES / "base_image_packages.txt"
+    section = run_rpm(host_root, fixture_executor, baseline_packages_file=baseline_file)
     assert section is not None
     assert section.no_baseline is False
     assert section.baseline_package_names is not None
@@ -496,7 +494,7 @@ def test_users_groups_inspector_with_fixtures(host_root, fixture_executor):
 
 
 def test_run_all_with_fixtures(host_root, fixture_executor):
-    """Full run without comps → no_baseline; no-baseline warning added, tool does not exit."""
+    """Full run with base image query → baseline applied, all inspectors run."""
     tool_root = Path(__file__).parent.parent
     snapshot = run_all(
         host_root,
@@ -510,11 +508,12 @@ def test_run_all_with_fixtures(host_root, fixture_executor):
     assert snapshot.os_release is not None
     assert snapshot.os_release.name == "Red Hat Enterprise Linux"
     assert snapshot.rpm is not None
-    assert snapshot.rpm.no_baseline is True
+    assert snapshot.rpm.no_baseline is False
+    assert snapshot.rpm.baseline_package_names is not None
     assert len(snapshot.rpm.packages_added) > 0
-    rpm_warnings = [w for w in snapshot.warnings if w.get("source") == "rpm"]
-    no_baseline_msg = "Could not fetch comps XML"
-    assert any(no_baseline_msg in w.get("message", "") for w in rpm_warnings)
+    added_names = [p.name for p in snapshot.rpm.packages_added]
+    assert "httpd" in added_names
+    assert "bash" not in added_names
     assert snapshot.services is not None
     assert snapshot.config is not None
     assert snapshot.network is not None
@@ -527,24 +526,28 @@ def test_run_all_with_fixtures(host_root, fixture_executor):
     assert snapshot.users_groups is not None
 
 
-def test_run_all_minimal_fallback_warning(host_root, fixture_executor):
-    """Comps from file but no kickstart → @minimal fallback; profile warning present, tool continues."""
+def test_run_all_no_baseline_warning(host_root):
+    """When podman fails, no-baseline warning is produced and tool continues."""
+    def failing_executor(cmd, cwd=None):
+        cmd_str = " ".join(cmd)
+        if "podman" in cmd:
+            return RunResult(stdout="", stderr="not available", returncode=127)
+        if "rpm" in cmd and "-qa" in cmd:
+            return RunResult(stdout=(FIXTURES / "rpm_qa_output.txt").read_text(), stderr="", returncode=0)
+        if "rpm" in cmd and "-Va" in cmd:
+            return RunResult(stdout=(FIXTURES / "rpm_va_output.txt").read_text(), stderr="", returncode=0)
+        if "rpm" in cmd and "-ql" in cmd:
+            return RunResult(stdout=(FIXTURES / "rpm_qla_output.txt").read_text(), stderr="", returncode=0)
+        if "systemctl" in cmd:
+            return RunResult(stdout=(FIXTURES / "systemctl_list_unit_files.txt").read_text(), stderr="", returncode=0)
+        return RunResult(stdout="", stderr="", returncode=1)
+
     tool_root = Path(__file__).parent.parent
-    comps_file = FIXTURES / "comps_minimal.xml"
-    snapshot = run_all(
-        host_root,
-        executor=fixture_executor,
-        tool_root=tool_root,
-        config_diffs=False,
-        deep_binary_scan=False,
-        query_podman=False,
-        comps_file=comps_file,
-    )
+    snapshot = run_all(host_root, executor=failing_executor, tool_root=tool_root)
     assert snapshot.rpm is not None
-    assert snapshot.rpm.no_baseline is False
-    assert snapshot.rpm.baseline_package_names is not None
-    profile_warnings = [w for w in snapshot.warnings if "install profile" in w.get("message", "").lower() or "@minimal" in w.get("message", "")]
-    assert any("@minimal" in w.get("message", "") for w in profile_warnings)
+    assert snapshot.rpm.no_baseline is True
+    rpm_warnings = [w for w in snapshot.warnings if w.get("source") == "rpm"]
+    assert any("base image" in w.get("message", "").lower() for w in rpm_warnings)
 
 
 def test_snapshot_roundtrip_with_baseline(host_root, fixture_executor):
@@ -553,7 +556,6 @@ def test_snapshot_roundtrip_with_baseline(host_root, fixture_executor):
     from rhel2bootc.pipeline import load_snapshot, save_snapshot
     from rhel2bootc.renderers import run_all as run_all_renderers
     tool_root = Path(__file__).parent.parent
-    comps_file = FIXTURES / "comps_minimal.xml"
     snapshot = run_all(
         host_root,
         executor=fixture_executor,
@@ -561,7 +563,6 @@ def test_snapshot_roundtrip_with_baseline(host_root, fixture_executor):
         config_diffs=False,
         deep_binary_scan=False,
         query_podman=False,
-        comps_file=comps_file,
     )
     assert snapshot.rpm is not None
     assert snapshot.rpm.no_baseline is False

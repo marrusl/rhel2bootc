@@ -13,7 +13,7 @@ def test_defaults():
     assert args.output_dir == Path("./rhel2bootc-output")
     assert args.from_snapshot is None
     assert args.inspect_only is False
-    assert args.comps_file is None
+    assert args.baseline_packages is None
     assert args.config_diffs is False
     assert args.deep_binary_scan is False
     assert args.query_podman is False
@@ -29,7 +29,7 @@ def test_all_flags_set():
         "--output-dir", "/tmp/out",
         "--from-snapshot", "/tmp/snap.json",
         "--inspect-only",
-        "--comps-file", "/tmp/comps.xml",
+        "--baseline-packages", "/tmp/pkgs.txt",
         "--config-diffs",
         "--deep-binary-scan",
         "--query-podman",
@@ -42,7 +42,7 @@ def test_all_flags_set():
     assert args.output_dir == Path("/tmp/out")
     assert args.from_snapshot == Path("/tmp/snap.json")
     assert args.inspect_only is True
-    assert args.comps_file == Path("/tmp/comps.xml")
+    assert args.baseline_packages == Path("/tmp/pkgs.txt")
     assert args.config_diffs is True
     assert args.deep_binary_scan is True
     assert args.query_podman is True
@@ -52,11 +52,11 @@ def test_all_flags_set():
     assert args.yes is True
 
 
-def test_comps_file_reaches_inspectors():
-    """--comps-file is parsed and passed through __main__._run_inspectors to run_all."""
+def test_baseline_packages_reaches_inspectors():
+    """--baseline-packages is parsed and passed through __main__._run_inspectors to run_all."""
     import unittest.mock
-    args = parse_args(["--comps-file", "/tmp/comps.xml"])
-    assert args.comps_file == Path("/tmp/comps.xml")
+    args = parse_args(["--baseline-packages", "/tmp/pkgs.txt"])
+    assert args.baseline_packages == Path("/tmp/pkgs.txt")
 
     with unittest.mock.patch("rhel2bootc.inspectors.run_all") as mock_run_all:
         mock_run_all.return_value = unittest.mock.MagicMock()
@@ -64,5 +64,4 @@ def test_comps_file_reaches_inspectors():
         _run_inspectors(Path("/host"), args)
         mock_run_all.assert_called_once()
         call_kwargs = mock_run_all.call_args
-        assert call_kwargs.kwargs.get("comps_file") == Path("/tmp/comps.xml") or \
-               (len(call_kwargs.args) > 0 and call_kwargs[1].get("comps_file") == Path("/tmp/comps.xml"))
+        assert call_kwargs.kwargs.get("baseline_packages_file") == Path("/tmp/pkgs.txt")

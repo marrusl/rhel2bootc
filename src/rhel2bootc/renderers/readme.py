@@ -8,6 +8,8 @@ from ..schema import ConfigFileKind, InspectionSnapshot
 
 
 def _base_image(snapshot: InspectionSnapshot) -> str:
+    if snapshot.rpm and snapshot.rpm.base_image:
+        return snapshot.rpm.base_image
     if not snapshot.os_release:
         return "registry.redhat.io/rhel9/rhel-bootc:9.6"
     osr = snapshot.os_release
@@ -67,7 +69,7 @@ def render(
     if snapshot.rpm and snapshot.rpm.no_baseline:
         lines.append(f"| Packages (all — no baseline) | {pkg_added} |")
     else:
-        lines.append(f"| Packages added | {pkg_added} |")
+        lines.append(f"| Packages added (beyond base image) | {pkg_added} |")
     if pkg_removed:
         lines.append(f"| Packages removed | {pkg_removed} |")
     lines.append(f"| Configs modified (RPM-owned) | {configs_modified} |")

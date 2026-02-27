@@ -70,9 +70,10 @@ class RpmSection(BaseModel):
     repo_files: List[RepoFile] = Field(default_factory=list)
     dnf_history_removed: List[str] = Field(default_factory=list)  # package names
 
-    # Resolved baseline (cached in snapshot for --from-snapshot re-renders)
+    # Baseline from target bootc base image (cached for --from-snapshot)
+    base_image: Optional[str] = None  # e.g. "quay.io/centos-bootc/centos-bootc:stream9"
     baseline_package_names: Optional[List[str]] = None
-    no_baseline: bool = False  # True when comps unavailable → all-packages mode
+    no_baseline: bool = False  # True when base image cannot be queried
 
 
 # --- Config Inspector ---
