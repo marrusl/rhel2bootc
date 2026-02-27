@@ -32,6 +32,11 @@ RPM_QA_QUERYFORMAT = r"%{EPOCH}:%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}"
 
 _RPM_LOCK_DEFINE = ["--define", "_rpmlock_path /var/tmp/.rpm.lock"]
 
+_VIRTUAL_PACKAGES: Set[str] = {
+    "gpg-pubkey",
+    "gpg-pubkey-release",
+}
+
 
 def _parse_nevr(nevra: str) -> Optional[PackageEntry]:
     """Parse a single NEVRA line from rpm -qa --queryformat.
@@ -197,7 +202,8 @@ def run(
         if result_qa.returncode != 0:
             cmd_qa = ["rpm", "--root", str(host_root)] + _RPM_LOCK_DEFINE + ["-qa", "--queryformat", RPM_QA_QUERYFORMAT + "\\n"]
             result_qa = executor(cmd_qa)
-        installed = _parse_rpm_qa(result_qa.stdout)
+        installed = [p for p in _parse_rpm_qa(result_qa.stdout)
+                     if p.name not in _VIRTUAL_PACKAGES]
     else:
         installed = []
 
