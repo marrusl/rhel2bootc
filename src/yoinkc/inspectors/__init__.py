@@ -177,7 +177,9 @@ def run_all(
             "message": (
                 "Could not query base image package list. "
                 "No baseline available — all installed packages will be included in the Containerfile. "
-                "To reduce image size, pull the base image first or provide a package list via --baseline-packages."
+                "Common fixes: (1) run with 'sudo podman run …' (rootless containers cannot "
+                "nsenter the host), (2) ensure --pid=host is set, or (3) provide a package "
+                "list via --baseline-packages FILE."
             ),
             "severity": "warning",
         })

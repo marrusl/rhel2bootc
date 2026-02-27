@@ -3,9 +3,11 @@ Tests for inspectors using fixture data. No subprocess or real host required.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+import yoinkc.baseline as baseline_mod
 from yoinkc.executor import Executor, RunResult
 from yoinkc.inspectors import run_all
 from yoinkc.inspectors.rpm import _parse_nevr, _parse_rpm_qa, _parse_rpm_va
@@ -15,8 +17,17 @@ from yoinkc.schema import InspectionSnapshot, RpmSection
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _mock_user_namespace():
+    """Pretend we are NOT in a user namespace so nsenter probe runs."""
+    with patch.object(baseline_mod, "_in_user_namespace", return_value=False):
+        yield
+
+
 def _fixture_executor(cmd, cwd=None):
     """Executor that returns fixture file content for known commands."""
+    if cmd[-1] == "true" and "nsenter" in cmd:
+        return RunResult(stdout="", stderr="", returncode=0)
     cmd_str = " ".join(cmd)
     if "podman" in cmd and "rpm" in cmd and "-qa" in cmd:
         return RunResult(stdout=(FIXTURES / "base_image_packages.txt").read_text(), stderr="", returncode=0)

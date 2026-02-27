@@ -19,18 +19,82 @@ from typing import Dict, List, Optional, Set, Tuple
 
 _DEBUG = bool(os.environ.get("YOINKC_DEBUG", ""))
 
+_nsenter_available: Optional[bool] = None
+
 
 def _debug(msg: str) -> None:
     if _DEBUG:
         print(f"[yoinkc] baseline: {msg}", file=sys.stderr)
 
 
+def _in_user_namespace() -> bool:
+    """Return True if we're running inside a non-root user namespace.
+
+    Rootless podman creates a user namespace where the inner uid 0 maps to an
+    unprivileged host uid.  In that case ``nsenter -t 1`` will always fail with
+    EPERM because ``setns()`` requires real ``CAP_SYS_ADMIN`` in the *target*
+    namespace.
+    """
+    try:
+        text = Path("/proc/self/uid_map").read_text()
+        for line in text.strip().splitlines():
+            parts = line.split()
+            if len(parts) >= 3 and parts[0] == "0" and parts[1] != "0":
+                return True
+    except (OSError, ValueError):
+        pass
+    return False
+
+
+def _nsenter_probe(executor) -> bool:
+    """Run a fast no-op via nsenter to check whether namespace entry works.
+
+    Caches the result so we only probe once per run.
+    """
+    global _nsenter_available
+    if _nsenter_available is not None:
+        return _nsenter_available
+
+    if _in_user_namespace():
+        _debug("running inside a user namespace (rootless container) — "
+               "nsenter into host namespaces will not work. "
+               "Run the container with 'sudo podman run …' or provide "
+               "--baseline-packages FILE.")
+        _nsenter_available = False
+        return False
+
+    probe = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--", "true"]
+    _debug(f"nsenter probe: {' '.join(probe)}")
+    result = executor(probe)
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        if "Operation not permitted" in stderr:
+            _debug(f"nsenter probe failed (EPERM): {stderr}. "
+                   "This typically means the container is rootless. "
+                   "Run with 'sudo podman run …' or provide "
+                   "--baseline-packages FILE.")
+        elif "No such process" in stderr:
+            _debug(f"nsenter probe failed: {stderr}. "
+                   "Is --pid=host set on the container?")
+        else:
+            _debug(f"nsenter probe failed (rc={result.returncode}): {stderr}")
+        _nsenter_available = False
+        return False
+
+    _debug("nsenter probe succeeded")
+    _nsenter_available = True
+    return True
+
+
 def _run_on_host(executor, cmd: List[str]):
     """Run *cmd* on the host via nsenter into PID 1's namespaces.
 
-    Requires ``--pid=host`` and ``--privileged`` (or equivalent capabilities)
-    on the outer container.
+    Requires ``--pid=host`` and ``sudo`` (rootful) on the outer container.
+    Returns None if nsenter is not available (rootless container, missing
+    ``--pid=host``, etc.).
     """
+    if not _nsenter_probe(executor):
+        return None
     nsenter_cmd = ["nsenter", "-t", "1", "-m", "-u", "-i", "-n", "--"] + cmd
     _debug(f"nsenter cmd: {' '.join(nsenter_cmd)}")
     result = executor(nsenter_cmd)
@@ -85,6 +149,8 @@ def query_base_image_packages(
     ]
     _debug(f"querying base image: {' '.join(cmd)}")
     result = _run_on_host(executor, cmd)
+    if result is None:
+        return None
     if result.returncode != 0:
         _debug(f"podman run failed (rc={result.returncode}): "
                f"{result.stderr.strip()[:800]}")
@@ -117,6 +183,8 @@ def query_base_image_presets(
     ]
     _debug(f"querying base image presets: {' '.join(cmd)}")
     result = _run_on_host(executor, cmd)
+    if result is None:
+        return None
     if result.returncode != 0:
         _debug(f"preset query failed (rc={result.returncode}): "
                f"{result.stderr.strip()[:200]}")

@@ -1,18 +1,35 @@
 """Tests for baseline generation (base image query)."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
+import yoinkc.baseline as baseline_mod
 from yoinkc.baseline import (
     select_base_image,
     load_baseline_packages_file,
     get_baseline_packages,
+    _in_user_namespace,
+    _nsenter_probe,
 )
 from yoinkc.executor import RunResult
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _make_executor(podman_result=None, probe_ok=True):
+    """Build a mock executor that handles the nsenter probe and podman commands."""
+    def executor(cmd, cwd=None):
+        if cmd[-1] == "true" and "nsenter" in cmd:
+            if probe_ok:
+                return RunResult(stdout="", stderr="", returncode=0)
+            return RunResult(stdout="", stderr="Operation not permitted", returncode=1)
+        if podman_result is not None and "podman" in cmd:
+            return podman_result(cmd) if callable(podman_result) else podman_result
+        return RunResult(stdout="", stderr="", returncode=1)
+    return executor
 
 
 def test_select_base_image_rhel9():
@@ -53,19 +70,20 @@ def test_get_baseline_with_file():
     assert base_image == "quay.io/centos-bootc/centos-bootc:stream9"
 
 
-def test_get_baseline_with_podman():
+@patch.object(baseline_mod, "_in_user_namespace", return_value=False)
+def test_get_baseline_with_podman(_mock_userns):
     """When executor is provided, podman is called to query the base image."""
     host_root = FIXTURES / "host_etc"
     pkg_list = (FIXTURES / "base_image_packages.txt").read_text()
 
-    def mock_executor(cmd, cwd=None):
-        if "podman" in cmd and "rpm" in cmd:
+    def podman_handler(cmd):
+        if "rpm" in cmd:
             return RunResult(stdout=pkg_list, stderr="", returncode=0)
         return RunResult(stdout="", stderr="", returncode=1)
 
     names, base_image, no_baseline = get_baseline_packages(
         host_root, "centos", "9",
-        executor=mock_executor,
+        executor=_make_executor(podman_result=podman_handler),
     )
     assert no_baseline is False
     assert names is not None
@@ -82,16 +100,66 @@ def test_get_baseline_no_podman_no_file():
     assert no_baseline is True
 
 
-def test_get_baseline_podman_fails():
+@patch.object(baseline_mod, "_in_user_namespace", return_value=False)
+def test_get_baseline_podman_fails(_mock_userns):
     """When podman fails, falls back to no-baseline mode."""
     host_root = FIXTURES / "host_etc"
 
-    def mock_executor(cmd, cwd=None):
-        return RunResult(stdout="", stderr="Error: ...", returncode=125)
-
+    podman_err = RunResult(stdout="", stderr="Error: ...", returncode=125)
     names, base_image, no_baseline = get_baseline_packages(
         host_root, "centos", "9",
-        executor=mock_executor,
+        executor=_make_executor(podman_result=podman_err),
     )
     assert no_baseline is True
     assert base_image == "quay.io/centos-bootc/centos-bootc:stream9"
+
+
+@patch.object(baseline_mod, "_in_user_namespace", return_value=False)
+def test_nsenter_probe_eperm_falls_back(_mock_userns):
+    """nsenter EPERM (rootless container) → probe fails, no-baseline mode."""
+    host_root = FIXTURES / "host_etc"
+    names, base_image, no_baseline = get_baseline_packages(
+        host_root, "centos", "9",
+        executor=_make_executor(probe_ok=False),
+    )
+    assert no_baseline is True
+    assert base_image == "quay.io/centos-bootc/centos-bootc:stream9"
+
+
+def test_user_namespace_detection_rootless():
+    """Rootless uid_map (inner 0 → outer 1000) triggers user-namespace detection."""
+    with patch("yoinkc.baseline.Path") as MockPath:
+        MockPath.return_value.read_text.return_value = "         0       1000          1\n"
+        assert _in_user_namespace() is True
+
+
+def test_user_namespace_detection_rootful():
+    """Rootful uid_map (0 → 0) is not flagged as user namespace."""
+    with patch("yoinkc.baseline.Path") as MockPath:
+        MockPath.return_value.read_text.return_value = "         0          0 4294967295\n"
+        assert _in_user_namespace() is False
+
+
+def test_user_namespace_no_procfs():
+    """Missing /proc/self/uid_map (e.g. macOS) defaults to False."""
+    with patch("yoinkc.baseline.Path") as MockPath:
+        MockPath.return_value.read_text.side_effect = OSError("not found")
+        assert _in_user_namespace() is False
+
+
+@patch.object(baseline_mod, "_in_user_namespace", return_value=True)
+def test_nsenter_skipped_in_user_namespace(_mock_userns):
+    """When inside a user namespace, nsenter is skipped entirely (no probe)."""
+    host_root = FIXTURES / "host_etc"
+    calls = []
+
+    def tracking_executor(cmd, cwd=None):
+        calls.append(cmd)
+        return RunResult(stdout="", stderr="", returncode=0)
+
+    names, base_image, no_baseline = get_baseline_packages(
+        host_root, "centos", "9",
+        executor=tracking_executor,
+    )
+    assert no_baseline is True
+    assert len(calls) == 0, "No commands should be executed when in user namespace"
