@@ -144,7 +144,9 @@ def run_all(
     hostname_path = host_root / "etc" / "hostname"
     try:
         if hostname_path.exists():
-            meta["hostname"] = hostname_path.read_text().strip().splitlines()[0]
+            lines = hostname_path.read_text().strip().splitlines()
+            if lines:
+                meta["hostname"] = lines[0]
     except (PermissionError, OSError):
         pass
     os_release = _read_os_release(host_root)
